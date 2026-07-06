@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use crate::code::CodeAtom;
+use crate::mask::{MaskByte, MaskedAtom};
 
 pub struct RuleInputs<'a> {
     pub sample_name: &'a str,
@@ -60,6 +61,90 @@ pub fn build_rule(inp: &RuleInputs) -> String {
     out.push_str("    uint32(0) == 0x464c457f and any of ($panic*) and any of ($code*)\n");
     out.push_str("}\n");
     out
+}
+
+/// Tier 1 flagship rule (architecture §5, §6, §7). Condition requires the
+/// masked-code factor AND the independent behavioral-data factor — the two
+/// things whose improbabilities are allowed to multiply (§6). Panic strings
+/// are included only as confirming/informational context in `meta`, never
+/// in the condition, so they are never double-counted as independent
+/// evidence for the same functions that produced them.
+pub struct Tier1Inputs<'a> {
+    pub sample_name: &'a str,
+    pub sample_path: &'a Path,
+    pub sample_sha256: String,
+    pub min_anchors: usize,
+    pub strong_fn_count: usize,
+    pub panic_strings: Vec<String>,
+    pub masked_atoms: Vec<MaskedAtom>,
+    pub behavior_strings: Vec<String>,
+    pub corpus_size: usize,
+}
+
+pub fn build_tier1_rule(inp: &Tier1Inputs) -> String {
+    let rule_name = sanitize_ident(&format!("winnow_tier1_{}", inp.sample_name));
+    let mut out = String::new();
+
+    out.push_str(&format!("rule {} {{\n", rule_name));
+    out.push_str("  meta:\n");
+    out.push_str("    generator = \"winnow-phase3\"\n");
+    out.push_str("    tier = \"1\"\n");
+    out.push_str(&format!("    sample = \"{}\"\n", escape_str(inp.sample_name)));
+    out.push_str(&format!(
+        "    sample_path = \"{}\"\n",
+        escape_str(&inp.sample_path.display().to_string())
+    ));
+    out.push_str(&format!("    sample_sha256 = \"{}\"\n", inp.sample_sha256));
+    out.push_str(&format!("    min_anchors = {}\n", inp.min_anchors));
+    out.push_str(&format!("    strong_functions = {}\n", inp.strong_fn_count));
+    out.push_str(&format!(
+        "    confirming_panic_strings = \"{}\"\n",
+        escape_str(&inp.panic_strings.join("; "))
+    ));
+    out.push_str(&format!(
+        "    benign_corpus_size = {}\n",
+        inp.corpus_size
+    ));
+    out.push_str(
+        "    rests_on = \"masked-hex code factor (relocation-patched operands, \
+         RIP-relative displacements, and 64-bit absolute immediates masked; whole-atom \
+         substring-reduced against the benign corpus, architecture critique finding 2) AND \
+         an independent non-panic author-data string (rarity-filtered against the same \
+         corpus). Panic-path strings are confirming only (architecture section 6) and are \
+         listed above in meta, not required by this rule's condition, so they are never \
+         double-counted as independent evidence.\"\n",
+    );
+    out.push_str("  strings:\n");
+    for (i, atom) in inp.masked_atoms.iter().enumerate() {
+        out.push_str(&format!(
+            "    $mcode{} = {{ {} }} // fn 0x{:x}\n",
+            i,
+            hex_masked(&atom.bytes),
+            atom.fn_start
+        ));
+    }
+    for (i, s) in inp.behavior_strings.iter().enumerate() {
+        out.push_str(&format!(
+            "    $behavior{} = \"{}\" ascii\n",
+            i,
+            escape_str(s)
+        ));
+    }
+    out.push_str("  condition:\n");
+    out.push_str("    uint32(0) == 0x464c457f and any of ($mcode*) and any of ($behavior*)\n");
+    out.push_str("}\n");
+    out
+}
+
+fn hex_masked(bytes: &[MaskByte]) -> String {
+    bytes
+        .iter()
+        .map(|b| match b {
+            MaskByte::Exact(v) => format!("{:02X}", v),
+            MaskByte::Wildcard => "??".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn sanitize_ident(s: &str) -> String {

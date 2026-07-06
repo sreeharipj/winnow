@@ -1,6 +1,6 @@
 # Phase 2 — benign false-positive measurement
 
-Generated 2026-07-06T09:28:33Z. Benign corpus: 75 binaries.
+Generated 2026-07-06T10:55:01Z. Benign corpus: 75 binaries.
 
 | Sample | Rule generated | Self-fire | Benign FP count | Benign hits (diagnosis) |
 |---|---|---|---|---|
