@@ -1,0 +1,10 @@
+/target
+/.claude/
+/corpus/_build/
+/corpus/bin/
+/corpus/*.log
+/corpus/build_failures.log*
+/corpus/manifest.csv.*
+!/corpus/manifest.csv
+/rules/*.yar
+/results/*_benign_hits.txt

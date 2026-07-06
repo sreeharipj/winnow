@@ -1,0 +1,23 @@
+[package]
+name = "winnow"
+version = "0.1.0"
+edition = "2021"
+description = "Automated YARA-X signature generator for stripped Rust malware (backend: unhusk)"
+
+[[bin]]
+name = "winnow"
+path = "src/main.rs"
+
+[dependencies]
+object = { version = "0.36", default-features = false, features = ["read", "elf", "std"] }
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "op_code_info"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
