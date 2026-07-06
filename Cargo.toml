@@ -3,6 +3,7 @@ name = "winnow"
 version = "0.1.0"
 edition = "2021"
 description = "Automated YARA-X signature generator for stripped Rust malware (backend: unhusk)"
+license = "AGPL-3.0-only OR LicenseRef-Commercial"
 
 [[bin]]
 name = "winnow"
