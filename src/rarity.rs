@@ -94,3 +94,78 @@ fn masked_match_anywhere(hay: &[u8], pat: &[MaskByte]) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn corpus(files: Vec<(&str, &[u8])>) -> Corpus {
+        Corpus {
+            files: files
+                .into_iter()
+                .map(|(n, d)| (n.to_string(), d.to_vec()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn contains_subslice_edge_cases() {
+        assert!(!contains_subslice(b"abc", b"")); // empty needle never matches
+        assert!(!contains_subslice(b"ab", b"abc")); // needle longer than haystack
+        assert!(contains_subslice(b"abcdef", b"cde"));
+    }
+
+    #[test]
+    fn string_is_rare_when_absent_from_every_file() {
+        let c = corpus(vec![("a", b"hello world"), ("b", b"goodbye")]);
+        assert!(c.string_is_rare("needle"));
+    }
+
+    #[test]
+    fn string_is_not_rare_when_present_in_any_file() {
+        let c = corpus(vec![("a", b"hello world"), ("b", b"goodbye")]);
+        assert!(!c.string_is_rare("hello"));
+    }
+
+    #[test]
+    fn masked_atom_collision_matches_through_wildcards() {
+        // Pattern "AA ?? CC" must match "AA BB CC" even though the
+        // wildcarded byte differs.
+        let atom = MaskedAtom {
+            fn_start: 0,
+            bytes: vec![
+                MaskByte::Exact(0xAA),
+                MaskByte::Wildcard,
+                MaskByte::Exact(0xCC),
+            ],
+        };
+        let c = corpus(vec![("benign", &[0x00, 0xAA, 0xBB, 0xCC, 0x00])]);
+        assert_eq!(c.masked_atom_collisions(&atom), vec!["benign".to_string()]);
+    }
+
+    #[test]
+    fn masked_atom_no_collision_when_an_exact_byte_differs() {
+        let atom = MaskedAtom {
+            fn_start: 0,
+            bytes: vec![
+                MaskByte::Exact(0xAA),
+                MaskByte::Wildcard,
+                MaskByte::Exact(0xCC),
+            ],
+        };
+        let c = corpus(vec![("benign", &[0xAA, 0xBB, 0xDD])]); // last byte differs
+        assert!(c.masked_atom_collisions(&atom).is_empty());
+    }
+
+    #[test]
+    fn all_wildcard_pattern_never_reports_a_collision() {
+        // An atom with no exact anchor byte can't discriminate anything;
+        // it must never be treated as match-everything.
+        let atom = MaskedAtom {
+            fn_start: 0,
+            bytes: vec![MaskByte::Wildcard; 4],
+        };
+        let c = corpus(vec![("benign", &[0, 1, 2, 3, 4, 5])]);
+        assert!(c.masked_atom_collisions(&atom).is_empty());
+    }
+}

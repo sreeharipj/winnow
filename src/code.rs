@@ -91,3 +91,67 @@ pub fn extract_code_atoms(text: &Section, fn_start: u64, fn_end: u64) -> Vec<Cod
 
     atoms
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elfview::Section;
+
+    const FN_START: u64 = 0x1000;
+
+    fn text_section(bytes: &[u8]) -> Section {
+        Section {
+            vaddr: FN_START,
+            data: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn extracts_context_window_around_a_direct_call() {
+        let mut bytes = vec![0x90; 6]; // padding before the call
+        bytes.extend_from_slice(&[0xE8, 0x00, 0x00, 0x00, 0x00]); // call rel32
+        let fn_end = FN_START + bytes.len() as u64;
+        let text = text_section(&bytes);
+
+        let atoms = extract_code_atoms(&text, FN_START, fn_end);
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].fn_start, FN_START);
+        assert_eq!(atoms[0].bytes, bytes);
+    }
+
+    #[test]
+    fn ignores_indirect_calls_and_falls_back_to_entry_window() {
+        let mut bytes = vec![0x90; 10];
+        bytes.extend_from_slice(&[0xFF, 0xD0]); // call rax (indirect)
+        let fn_end = FN_START + bytes.len() as u64;
+        let text = text_section(&bytes);
+
+        let atoms = extract_code_atoms(&text, FN_START, fn_end);
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].bytes, bytes); // fallback: whole (short) function
+    }
+
+    #[test]
+    fn caps_atoms_at_three_per_function() {
+        let mut bytes = Vec::new();
+        for _ in 0..4 {
+            bytes.extend_from_slice(&[0x90; 6]);
+            bytes.extend_from_slice(&[0xE8, 0x00, 0x00, 0x00, 0x00]);
+        }
+        let fn_end = FN_START + bytes.len() as u64;
+        let text = text_section(&bytes);
+
+        let atoms = extract_code_atoms(&text, FN_START, fn_end);
+        assert_eq!(atoms.len(), MAX_ATOMS_PER_FN);
+    }
+
+    #[test]
+    fn leaf_function_too_short_for_any_atom_yields_nothing() {
+        let bytes = vec![0x90; 4]; // shorter than MIN_ATOM_LEN
+        let fn_end = FN_START + bytes.len() as u64;
+        let text = text_section(&bytes);
+
+        let atoms = extract_code_atoms(&text, FN_START, fn_end);
+        assert!(atoms.is_empty());
+    }
+}

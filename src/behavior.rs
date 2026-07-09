@@ -107,3 +107,113 @@ fn try_extract_string(rodata: &Section, vaddr: u64, len: usize) -> Option<String
     }
     Some(s.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elfview::Section;
+
+    const FN_START: u64 = 0x1000;
+
+    /// `lea reg, [rip+disp32]` targeting `target_vaddr`, given the address
+    /// (`next_ip`) of the instruction immediately after it.
+    fn lea_bytes(target_vaddr: u64, next_ip: u64) -> [u8; 7] {
+        let disp = (target_vaddr as i64 - next_ip as i64) as i32;
+        let d = disp.to_le_bytes();
+        [0x48, 0x8D, 0x05, d[0], d[1], d[2], d[3]]
+    }
+
+    /// `mov edx, imm32` — the length half of Rust's fat-pointer pairing.
+    fn mov_edx_imm32(len: u32) -> [u8; 5] {
+        let b = len.to_le_bytes();
+        [0xBA, b[0], b[1], b[2], b[3]]
+    }
+
+    fn text_section(bytes: &[u8]) -> Section {
+        Section {
+            vaddr: FN_START,
+            data: bytes.to_vec(),
+        }
+    }
+
+    fn rodata_section(vaddr: u64, data: &[u8]) -> Section {
+        Section {
+            vaddr,
+            data: data.to_vec(),
+        }
+    }
+
+    #[test]
+    fn extracts_string_from_zero_gap_lea_mov_pair() {
+        let rodata_vaddr = 0x2000;
+        let s = b"hello world";
+        let lea = lea_bytes(rodata_vaddr, FN_START + 7);
+        let mov = mov_edx_imm32(s.len() as u32);
+        let mut fn_bytes = lea.to_vec();
+        fn_bytes.extend_from_slice(&mov);
+        let fn_end = FN_START + fn_bytes.len() as u64;
+
+        let text = text_section(&fn_bytes);
+        let rodata = rodata_section(rodata_vaddr, s);
+
+        let found = extract_behavior_strings(&text, &rodata, FN_START, fn_end);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "hello world");
+        assert_eq!(found[0].fn_start, FN_START);
+    }
+
+    #[test]
+    fn does_not_splice_across_a_gap_between_lea_and_mov() {
+        // Regression test for the fixed bug: an earlier version paired any
+        // LEA in a lookback window with a later MOV and spliced unrelated
+        // bytes together. One instruction between the two must now
+        // suppress extraction entirely.
+        let rodata_vaddr = 0x2000;
+        let s = b"hello world";
+        let lea = lea_bytes(rodata_vaddr, FN_START + 7);
+        let mov = mov_edx_imm32(s.len() as u32);
+        let mut fn_bytes = lea.to_vec();
+        fn_bytes.push(0x90); // nop — breaks zero-gap adjacency
+        fn_bytes.extend_from_slice(&mov);
+        let fn_end = FN_START + fn_bytes.len() as u64;
+
+        let text = text_section(&fn_bytes);
+        let rodata = rodata_section(rodata_vaddr, s);
+
+        let found = extract_behavior_strings(&text, &rodata, FN_START, fn_end);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn excludes_strings_that_look_like_source_paths() {
+        let rodata_vaddr = 0x2000;
+        let s = b"src/main.rs"; // 11 bytes — same length as the positive case
+        let lea = lea_bytes(rodata_vaddr, FN_START + 7);
+        let mov = mov_edx_imm32(s.len() as u32);
+        let mut fn_bytes = lea.to_vec();
+        fn_bytes.extend_from_slice(&mov);
+        let fn_end = FN_START + fn_bytes.len() as u64;
+
+        let text = text_section(&fn_bytes);
+        let rodata = rodata_section(rodata_vaddr, s);
+
+        let found = extract_behavior_strings(&text, &rodata, FN_START, fn_end);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn rejects_length_below_minimum() {
+        let rodata_vaddr = 0x2000;
+        let lea = lea_bytes(rodata_vaddr, FN_START + 7);
+        let mov = mov_edx_imm32(3); // below MIN_LEN, must short-circuit
+        let mut fn_bytes = lea.to_vec();
+        fn_bytes.extend_from_slice(&mov);
+        let fn_end = FN_START + fn_bytes.len() as u64;
+
+        let text = text_section(&fn_bytes);
+        let rodata = rodata_section(rodata_vaddr, &[]); // nothing valid to read
+
+        let found = extract_behavior_strings(&text, &rodata, FN_START, fn_end);
+        assert!(found.is_empty());
+    }
+}

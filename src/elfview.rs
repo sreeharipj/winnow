@@ -95,3 +95,58 @@ fn parse_rela_relative(data: &[u8]) -> Vec<RelaRelative> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section(vaddr: u64, data: Vec<u8>) -> Section {
+        Section { vaddr, data }
+    }
+
+    #[test]
+    fn slice_at_reads_within_bounds() {
+        let s = section(0x1000, vec![1, 2, 3, 4, 5]);
+        assert_eq!(s.slice_at(0x1000, 2), Some(&[1, 2][..]));
+        assert_eq!(s.slice_at(0x1002, 3), Some(&[3, 4, 5][..]));
+    }
+
+    #[test]
+    fn slice_at_rejects_before_start() {
+        let s = section(0x1000, vec![1, 2, 3]);
+        assert_eq!(s.slice_at(0x0ff0, 2), None);
+    }
+
+    #[test]
+    fn slice_at_rejects_past_end() {
+        let s = section(0x1000, vec![1, 2, 3]);
+        assert_eq!(s.slice_at(0x1002, 2), None); // only 1 byte left
+        assert_eq!(s.slice_at(0x1003, 1), None); // exactly at end, 0 bytes remain
+    }
+
+    #[test]
+    fn contains_vaddr_checks_half_open_range() {
+        let s = section(0x1000, vec![0; 4]); // covers [0x1000, 0x1004)
+        assert!(s.contains_vaddr(0x1000));
+        assert!(s.contains_vaddr(0x1003));
+        assert!(!s.contains_vaddr(0x1004));
+        assert!(!s.contains_vaddr(0x0fff));
+    }
+
+    #[test]
+    fn parse_rela_relative_keeps_only_r_x86_64_relative_entries() {
+        let mut data = Vec::new();
+        // entry 0: R_X86_64_RELATIVE (type 8) at offset 0x2000 — kept.
+        data.extend_from_slice(&0x2000u64.to_le_bytes());
+        data.extend_from_slice(&8u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        // entry 1: R_X86_64_GLOB_DAT (type 6) — must be filtered out.
+        data.extend_from_slice(&0x3000u64.to_le_bytes());
+        data.extend_from_slice(&6u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+
+        let out = parse_rela_relative(&data);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].offset, 0x2000);
+    }
+}

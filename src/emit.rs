@@ -176,3 +176,100 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn sanitize_ident_replaces_non_identifier_chars() {
+        assert_eq!(sanitize_ident("a-b.c"), "a_b_c");
+    }
+
+    #[test]
+    fn sanitize_ident_prefixes_a_leading_digit() {
+        assert_eq!(sanitize_ident("123abc"), "_123abc");
+    }
+
+    #[test]
+    fn sanitize_ident_falls_back_when_empty() {
+        assert_eq!(sanitize_ident(""), "winnow_rule");
+    }
+
+    #[test]
+    fn escape_str_escapes_quotes() {
+        assert_eq!(escape_str(r#"he said "hi""#), r#"he said \"hi\""#);
+    }
+
+    #[test]
+    fn escape_str_escapes_backslashes_before_quotes() {
+        assert_eq!(escape_str(r"C:\path"), r"C:\\path");
+    }
+
+    #[test]
+    fn hex_bytes_formats_uppercase_pairs() {
+        assert_eq!(hex_bytes(&[0x00, 0xFF, 0x1A]), "00 FF 1A");
+    }
+
+    #[test]
+    fn hex_masked_renders_wildcards() {
+        let bytes = vec![
+            MaskByte::Exact(0x01),
+            MaskByte::Wildcard,
+            MaskByte::Exact(0xFF),
+        ];
+        assert_eq!(hex_masked(&bytes), "01 ?? FF");
+    }
+
+    #[test]
+    fn build_rule_includes_strings_and_condition() {
+        let path = PathBuf::from("/tmp/sample.elf");
+        let inputs = RuleInputs {
+            sample_name: "sample",
+            sample_path: &path,
+            sample_sha256: "deadbeef".to_string(),
+            min_anchors: 2,
+            strong_fn_count: 1,
+            anchor_strings: vec!["panic at \"src/main.rs\"".to_string()],
+            code_atoms: vec![CodeAtom {
+                fn_start: 0x1000,
+                bytes: vec![0x90; 8],
+            }],
+        };
+
+        let text = build_rule(&inputs);
+        assert!(text.starts_with("rule winnow_sample {"));
+        assert!(text.contains("$panic0 = \"panic at \\\"src/main.rs\\\"\" ascii"));
+        assert!(text.contains("$code0 = { 90 90 90 90 90 90 90 90 }"));
+        assert!(text.contains("any of ($panic*) and any of ($code*)"));
+    }
+
+    #[test]
+    fn build_tier1_rule_condition_never_references_panic_strings() {
+        let path = PathBuf::from("/tmp/sample.elf");
+        let inputs = Tier1Inputs {
+            sample_name: "sample",
+            sample_path: &path,
+            sample_sha256: "deadbeef".to_string(),
+            min_anchors: 2,
+            strong_fn_count: 1,
+            panic_strings: vec!["src/main.rs".to_string()],
+            masked_atoms: vec![MaskedAtom {
+                fn_start: 0x1000,
+                bytes: vec![MaskByte::Exact(0x90)],
+            }],
+            behavior_strings: vec!["hello world".to_string()],
+            corpus_size: 75,
+        };
+
+        let text = build_tier1_rule(&inputs);
+        let condition = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("uint32(0)"))
+            .expect("condition line present");
+        assert!(condition.contains("$mcode*"));
+        assert!(condition.contains("$behavior*"));
+        assert!(!condition.contains("$panic"));
+    }
+}

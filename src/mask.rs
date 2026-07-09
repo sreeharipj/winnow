@@ -107,3 +107,90 @@ fn mask_range(out: &mut [MaskByte], instr_start: usize, rel_off: usize, size: us
         *b = MaskByte::Wildcard;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elfview::{RelaRelative, Section};
+
+    fn text_section(fn_start: u64, bytes: Vec<u8>) -> Section {
+        Section {
+            vaddr: fn_start,
+            data: bytes,
+        }
+    }
+
+    #[test]
+    fn wildcard_count_counts_only_wildcards() {
+        let atom = MaskedAtom {
+            fn_start: 0,
+            bytes: vec![MaskByte::Exact(1), MaskByte::Wildcard, MaskByte::Wildcard],
+        };
+        assert_eq!(atom.wildcard_count(), 2);
+    }
+
+    #[test]
+    fn masks_rip_relative_displacement_only() {
+        // lea rax, [rip+0x10]
+        let bytes = vec![0x48, 0x8D, 0x05, 0x10, 0x00, 0x00, 0x00];
+        let fn_start = 0x1000;
+        let text = text_section(fn_start, bytes.clone());
+        let atom = mask_function(&text, &[], fn_start, fn_start + bytes.len() as u64).unwrap();
+
+        assert_eq!(atom.bytes[0], MaskByte::Exact(0x48));
+        assert_eq!(atom.bytes[1], MaskByte::Exact(0x8D));
+        assert_eq!(atom.bytes[2], MaskByte::Exact(0x05));
+        for b in &atom.bytes[3..7] {
+            assert_eq!(*b, MaskByte::Wildcard);
+        }
+    }
+
+    #[test]
+    fn masks_64_bit_absolute_immediate() {
+        // movabs rax, 0x1122334455667788
+        let mut bytes = vec![0x48, 0xB8];
+        bytes.extend_from_slice(&0x1122334455667788u64.to_le_bytes());
+        let fn_start = 0x2000;
+        let text = text_section(fn_start, bytes.clone());
+        let atom = mask_function(&text, &[], fn_start, fn_start + bytes.len() as u64).unwrap();
+
+        assert_eq!(atom.bytes[0], MaskByte::Exact(0x48));
+        assert_eq!(atom.bytes[1], MaskByte::Exact(0xB8));
+        for b in &atom.bytes[2..10] {
+            assert_eq!(*b, MaskByte::Wildcard);
+        }
+    }
+
+    #[test]
+    fn masks_bytes_a_relocation_actually_patches() {
+        // mov eax, 0x11223344 — a plain 32-bit immediate that rules 1/2
+        // wouldn't otherwise touch, but a .rela.dyn entry says load-time
+        // patches the byte at fn_start+1 (the start of the immediate).
+        let bytes = vec![0xB8, 0x44, 0x33, 0x22, 0x11];
+        let fn_start = 0x3000;
+        let text = text_section(fn_start, bytes.clone());
+        let rela = [RelaRelative {
+            offset: fn_start + 1,
+        }];
+        let atom = mask_function(&text, &rela, fn_start, fn_start + bytes.len() as u64).unwrap();
+
+        assert_eq!(atom.bytes[0], MaskByte::Exact(0xB8));
+        for b in &atom.bytes[1..5] {
+            assert_eq!(*b, MaskByte::Wildcard);
+        }
+    }
+
+    #[test]
+    fn leaves_ordinary_stack_displacement_untouched() {
+        // mov eax, [rbp-8] — stack-relative, no volatility, must stay exact.
+        let bytes = vec![0x8B, 0x45, 0xF8];
+        let fn_start = 0x4000;
+        let text = text_section(fn_start, bytes.clone());
+        let atom = mask_function(&text, &[], fn_start, fn_start + bytes.len() as u64).unwrap();
+
+        assert_eq!(atom.wildcard_count(), 0);
+        for (i, b) in atom.bytes.iter().enumerate() {
+            assert_eq!(*b, MaskByte::Exact(bytes[i]));
+        }
+    }
+}
