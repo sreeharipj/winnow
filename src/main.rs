@@ -174,31 +174,49 @@ fn run_tier1(
 
     let rodata = elf.section(".rodata");
 
-    // Masked-hex code factor, substring-reduced against the corpus.
+    // Masked-hex code factor, substring-REDUCED against the corpus. The whole
+    // masked function is trivially collision-free (nothing benign is that long);
+    // reduce_atom shrinks it to its most-discriminative REDUCED_LEN-byte window
+    // and checks that, where a benign collision is actually possible. An atom
+    // with no clean window is dropped — discriminativeness is measured, not free.
     let mut masked_atoms = Vec::new();
+    let mut dropped_nondiscriminative = 0usize;
     for f in strong {
         let Some(atom) = mask::mask_function(text, &elf.rela_relative, f.start, f.end) else {
             continue;
         };
-        let collisions = corpus.masked_atom_collisions(&atom);
-        if collisions.is_empty() {
-            println!(
-                "winnow: tier1 — masked atom for fn 0x{:x} discriminative ({} of {} bytes wildcarded)",
-                f.start,
-                atom.wildcard_count(),
-                atom.bytes.len()
-            );
-            masked_atoms.push(atom);
-        } else {
-            eprintln!(
-                "winnow: tier1 — masked atom for fn 0x{:x} collides with {} benign file(s) \
-                 ({}), dropping it (critique finding 2: unreduced masked hex is unearned)",
-                f.start,
-                collisions.len(),
-                collisions.join(", ")
-            );
+        match corpus.reduce_atom(&atom) {
+            Some(reduced) => {
+                println!(
+                    "winnow: tier1 — masked atom for fn 0x{:x} reduced {}B → {}B window at +0x{:x} \
+                     ({} exact bytes, 0 corpus collisions)",
+                    f.start,
+                    reduced.orig_len,
+                    reduced.bytes.len(),
+                    reduced.start_offset,
+                    reduced.exact_bytes,
+                );
+                masked_atoms.push(mask::MaskedAtom {
+                    fn_start: f.start,
+                    bytes: reduced.bytes,
+                });
+            }
+            None => {
+                dropped_nondiscriminative += 1;
+                eprintln!(
+                    "winnow: tier1 — masked atom for fn 0x{:x} has no {}B window free of benign \
+                     collisions; dropped (not discriminative — critique finding 2)",
+                    f.start,
+                    rarity::REDUCED_LEN,
+                );
+            }
         }
     }
+    println!(
+        "winnow: tier1 — code factor: {} atom(s) reduced & kept, {} dropped as non-discriminative",
+        masked_atoms.len(),
+        dropped_nondiscriminative,
+    );
 
     // Independent non-panic author-data factor, rarity-filtered against the
     // corpus. Excludes anything already present in the panic-path set so the
@@ -214,11 +232,12 @@ fn run_tier1(
             }
         }
     }
-    let mut behavior_strings = Vec::new();
+    let harvested = behavior_candidates.len();
+    let mut behavior_strings: Vec<(String, u64)> = Vec::new();
     for (s, fn_start) in behavior_candidates {
         if corpus.string_is_rare(&s) {
             println!("winnow: tier1 — behavioral string {:?} (fn 0x{:x}) is rare — kept", s, fn_start);
-            behavior_strings.push(s);
+            behavior_strings.push((s, fn_start));
         } else {
             eprintln!(
                 "winnow: tier1 — candidate behavioral string {:?} appears in the benign \
@@ -228,22 +247,80 @@ fn run_tier1(
         }
     }
 
-    if masked_atoms.is_empty() || behavior_strings.is_empty() {
+    // Structural independence (architecture §6). The §6 argument that the two
+    // factors' improbabilities may be *multiplied* is only valid if the factors
+    // are independent, and the emitted condition is `any of ($mcode*) and any
+    // of ($behavior*)`. A masked atom and a behavioral string from the SAME
+    // function are not independent evidence — they are one function described
+    // two ways (its body, and a string it loads). So partition the STRONG
+    // functions: the string factor takes every function that yielded a kept
+    // string, and the code factor takes masked atoms only from functions that
+    // did NOT. The two function sets are then disjoint by construction, which
+    // makes the condition structurally guarantee that the matched atom and the
+    // matched string come from different functions — enforced, not asserted.
+    let masked_count = masked_atoms.len();
+    let behavior_fns: BTreeSet<u64> = behavior_strings.iter().map(|(_, f)| *f).collect();
+    let mut code_atoms = Vec::new();
+    for atom in masked_atoms {
+        if behavior_fns.contains(&atom.fn_start) {
+            eprintln!(
+                "winnow: tier1 — masked atom for fn 0x{:x} shares its function with a kept \
+                 behavioral string; dropped from the code factor to keep the two factors \
+                 independent (architecture §6)",
+                atom.fn_start
+            );
+        } else {
+            code_atoms.push(atom);
+        }
+    }
+
+    if code_atoms.is_empty() || behavior_strings.is_empty() {
+        // Separate the failure modes so the verdict names the real reason.
+        // "harvested nothing to filter" != "candidates harvested, none rare"
+        // != "factors exist but are not independent".
+        let behav_reason: String = if harvested == 0 {
+            "no non-panic author-string candidates were harvested from STRONG functions \
+             (LEA + length-immediate recovery found none)"
+                .to_string()
+        } else {
+            format!(
+                "{} non-panic behavioral candidate(s) were harvested but none survived \
+                 rarity filtering against the corpus",
+                harvested
+            )
+        };
+        let reason: String = if masked_count == 0 && behavior_strings.is_empty() {
+            format!("no masked-code atom survived substring reduction AND {behav_reason}")
+        } else if masked_count == 0 {
+            "no masked-code atom survived substring reduction".to_string()
+        } else if behavior_strings.is_empty() {
+            behav_reason
+        } else {
+            // Atoms and strings both exist, but every code-bearing function is
+            // also a string-bearing function, so no disjoint pairing remains.
+            "the code and behavioral factors are not independent: every function with a \
+             discriminative masked atom also produced the kept behavioral string(s), so \
+             no disjoint (code fn ≠ string fn) pairing exists (architecture §6). This is \
+             the single-STRONG-function case — one function cannot corroborate itself"
+                .to_string()
+        };
         eprintln!(
             "winnow: TIER 1 NOT EARNED for {} — {}. Tier 1 is the fortunate case \
              (architecture §5); Tier 2 rule above still stands.",
-            sample_name,
-            match (masked_atoms.is_empty(), behavior_strings.is_empty()) {
-                (true, true) => "no masked-code atom survived substring reduction AND no \
-                    independent behavioral string survived rarity filtering",
-                (true, false) => "no masked-code atom survived substring reduction",
-                (false, true) => "no independent (non-panic) behavioral string survived \
-                    rarity filtering against the corpus",
-                (false, false) => unreachable!(),
-            }
+            sample_name, reason
         );
         return Ok(());
     }
+
+    let code_fns: BTreeSet<u64> = code_atoms.iter().map(|a| a.fn_start).collect();
+    println!(
+        "winnow: tier1 — independence partition: code factor from {} function(s) {}, \
+         string factor from {} function(s) {} (disjoint)",
+        code_fns.len(),
+        fmt_fns(&code_fns),
+        behavior_fns.len(),
+        fmt_fns(&behavior_fns),
+    );
 
     let inputs = emit::Tier1Inputs {
         sample_name,
@@ -252,7 +329,7 @@ fn run_tier1(
         min_anchors: census.min_anchors,
         strong_fn_count: strong.len(),
         panic_strings: panic_strings.to_vec(),
-        masked_atoms,
+        masked_atoms: code_atoms,
         behavior_strings,
         corpus_size: corpus.len(),
     };
@@ -272,6 +349,16 @@ fn run_tier1(
         inputs.behavior_strings.len()
     );
     Ok(())
+}
+
+/// Render a set of function start addresses as `{0x.., 0x..}` for logging.
+fn fmt_fns(fns: &BTreeSet<u64>) -> String {
+    let inner = fns
+        .iter()
+        .map(|f| format!("0x{:x}", f))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{}}}", inner)
 }
 
 fn sha256_file(path: &std::path::Path) -> Result<String> {

@@ -77,7 +77,11 @@ pub struct Tier1Inputs<'a> {
     pub strong_fn_count: usize,
     pub panic_strings: Vec<String>,
     pub masked_atoms: Vec<MaskedAtom>,
-    pub behavior_strings: Vec<String>,
+    /// `(text, fn_start)` for each kept behavioral string. `fn_start` is the
+    /// function it was recovered from; by construction (main.rs) none of these
+    /// functions appears among `masked_atoms`' functions, so the two factors
+    /// are structurally independent (architecture §6).
+    pub behavior_strings: Vec<(String, u64)>,
     pub corpus_size: usize,
 }
 
@@ -105,14 +109,24 @@ pub fn build_tier1_rule(inp: &Tier1Inputs) -> String {
         "    benign_corpus_size = {}\n",
         inp.corpus_size
     ));
+    let code_fns = distinct_fns(inp.masked_atoms.iter().map(|a| a.fn_start));
+    let string_fns = distinct_fns(inp.behavior_strings.iter().map(|(_, f)| *f));
+    out.push_str(&format!(
+        "    independence = \"structural: code factor from function(s) {}; string factor \
+         from function(s) {}. The two function sets are disjoint, so any match of \
+         `any of ($mcode*) and any of ($behavior*)` necessarily pairs a masked code atom \
+         and a behavioral string from DIFFERENT functions — the §6 independence the FP \
+         argument multiplies over is enforced by construction, not asserted.\"\n",
+        code_fns, string_fns
+    ));
     out.push_str(
         "    rests_on = \"masked-hex code factor (relocation-patched operands, \
-         RIP-relative displacements, and 64-bit absolute immediates masked; whole-atom \
-         substring-reduced against the benign corpus, architecture critique finding 2) AND \
-         an independent non-panic author-data string (rarity-filtered against the same \
-         corpus). Panic-path strings are confirming only (architecture section 6) and are \
-         listed above in meta, not required by this rule's condition, so they are never \
-         double-counted as independent evidence.\"\n",
+         RIP-relative displacements, and 64-bit absolute immediates masked; substring-reduced \
+         against the benign corpus, architecture critique finding 2) AND an independent \
+         non-panic author-data string (rarity-filtered against the same corpus), drawn from a \
+         disjoint set of functions (see independence). Panic-path strings are confirming only \
+         (architecture section 6) and are listed above in meta, not required by this rule's \
+         condition, so they are never double-counted as independent evidence.\"\n",
     );
     out.push_str("  strings:\n");
     for (i, atom) in inp.masked_atoms.iter().enumerate() {
@@ -123,17 +137,31 @@ pub fn build_tier1_rule(inp: &Tier1Inputs) -> String {
             atom.fn_start
         ));
     }
-    for (i, s) in inp.behavior_strings.iter().enumerate() {
+    for (i, (s, fn_start)) in inp.behavior_strings.iter().enumerate() {
         out.push_str(&format!(
-            "    $behavior{} = \"{}\" ascii\n",
+            "    $behavior{} = \"{}\" ascii // fn 0x{:x}\n",
             i,
-            escape_str(s)
+            escape_str(s),
+            fn_start
         ));
     }
     out.push_str("  condition:\n");
     out.push_str("    uint32(0) == 0x464c457f and any of ($mcode*) and any of ($behavior*)\n");
     out.push_str("}\n");
     out
+}
+
+/// Sorted, de-duplicated `0x..`-formatted function starts, `{a, b}` style.
+fn distinct_fns(fns: impl Iterator<Item = u64>) -> String {
+    let mut v: Vec<u64> = fns.collect();
+    v.sort_unstable();
+    v.dedup();
+    let inner = v
+        .iter()
+        .map(|f| format!("0x{:x}", f))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{}}}", inner)
 }
 
 fn hex_masked(bytes: &[MaskByte]) -> String {
@@ -259,7 +287,7 @@ mod tests {
                 fn_start: 0x1000,
                 bytes: vec![MaskByte::Exact(0x90)],
             }],
-            behavior_strings: vec!["hello world".to_string()],
+            behavior_strings: vec![("hello world".to_string(), 0x2000)],
             corpus_size: 75,
         };
 
@@ -271,5 +299,31 @@ mod tests {
         assert!(condition.contains("$mcode*"));
         assert!(condition.contains("$behavior*"));
         assert!(!condition.contains("$panic"));
+    }
+
+    #[test]
+    fn build_tier1_rule_records_disjoint_independence_partition() {
+        let path = PathBuf::from("/tmp/sample.elf");
+        let inputs = Tier1Inputs {
+            sample_name: "sample",
+            sample_path: &path,
+            sample_sha256: "deadbeef".to_string(),
+            min_anchors: 2,
+            strong_fn_count: 2,
+            panic_strings: vec!["src/main.rs".to_string()],
+            masked_atoms: vec![MaskedAtom {
+                fn_start: 0x1000,
+                bytes: vec![MaskByte::Exact(0x90)],
+            }],
+            behavior_strings: vec![("evil.example".to_string(), 0x2000)],
+            corpus_size: 75,
+        };
+
+        let text = build_tier1_rule(&inputs);
+        // The independence meta must name the two disjoint function sets, and
+        // the string must be annotated with its originating function.
+        assert!(text.contains("independence = \"structural: code factor from function(s) {0x1000}"));
+        assert!(text.contains("string factor from function(s) {0x2000}"));
+        assert!(text.contains("$behavior0 = \"evil.example\" ascii // fn 0x2000"));
     }
 }

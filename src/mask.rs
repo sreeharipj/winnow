@@ -38,6 +38,7 @@ pub struct MaskedAtom {
 }
 
 impl MaskedAtom {
+    #[allow(dead_code)] // used by tests; emission path reports exact-byte counts
     pub fn wildcard_count(&self) -> usize {
         self.bytes
             .iter()

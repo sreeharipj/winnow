@@ -19,7 +19,10 @@ impl Corpus {
         for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?
         {
             let entry = entry?;
-            if !entry.file_type()?.is_file() {
+            // `Path::is_file` follows symlinks, so a corpus directory built
+            // from symlinks (as the A/B holdout split is) loads correctly;
+            // `entry.file_type()` would report the symlink itself and skip it.
+            if !entry.path().is_file() {
                 continue;
             }
             let data = std::fs::read(entry.path())?;
@@ -43,8 +46,9 @@ impl Corpus {
     }
 
     /// Names of corpus files a masked-hex atom collides with. Empty = the
-    /// atom is discriminative against this corpus (critique finding 2's
-    /// substring-reduction check, done empirically rather than assumed).
+    /// atom is discriminative against this corpus. Retained as a diagnostic
+    /// (and exercised by tests); the emission path uses [`Corpus::reduce_atom`].
+    #[allow(dead_code)]
     pub fn masked_atom_collisions(&self, atom: &MaskedAtom) -> Vec<String> {
         self.files
             .iter()
@@ -52,6 +56,78 @@ impl Corpus {
             .map(|(name, _)| name.clone())
             .collect()
     }
+
+    fn any_file_matches(&self, pat: &[MaskByte]) -> bool {
+        self.files
+            .iter()
+            .any(|(_, data)| masked_match_anywhere(data, pat))
+    }
+
+    /// Discriminative-substring *reduction* (architecture §7.B, critique
+    /// finding 2), done for real rather than asserted.
+    ///
+    /// The maximal atom — a whole masked function, hundreds to tens of
+    /// thousands of bytes — is trivially absent from any benign file, so
+    /// checking *it* for collisions stamps every atom "discriminative" for
+    /// free and proves nothing. The honest question is how *little* byte
+    /// specificity the corpus actually demands: we reduce the atom to its most
+    /// exact-byte-dense [`REDUCED_LEN`]-byte window and check *that*, where a
+    /// benign collision is genuinely possible. Candidate windows are tried
+    /// strongest-first (most exact bytes), so the first collision-free hit is
+    /// also the most discriminative. `None` means no window with at least
+    /// [`MIN_EXACT`] exact bytes is free of benign collisions — the function's
+    /// code is not discriminative at this granularity and the caller drops it.
+    pub fn reduce_atom(&self, atom: &MaskedAtom) -> Option<ReducedAtom> {
+        let n = atom.bytes.len();
+        let win_len = REDUCED_LEN.min(n);
+
+        let mut candidates: Vec<(usize, usize)> = (0..=(n - win_len))
+            .map(|off| (off, count_exact(&atom.bytes[off..off + win_len])))
+            .filter(|(_, exact)| *exact >= MIN_EXACT)
+            .collect();
+        // Most exact bytes first: the strongest window that survives the corpus
+        // is the one we want to emit.
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (off, exact) in candidates {
+            let win = &atom.bytes[off..off + win_len];
+            if !self.any_file_matches(win) {
+                return Some(ReducedAtom {
+                    start_offset: off,
+                    orig_len: n,
+                    exact_bytes: exact,
+                    bytes: win.to_vec(),
+                });
+            }
+        }
+        None
+    }
+}
+
+/// Target length of a reduced atom. 64 bytes of mostly-exact machine code is
+/// specific enough that a benign collision is near-impossible in practice, yet
+/// short enough to survive an instruction edit elsewhere in the function —
+/// unlike the whole-function maximal atom, which any single change breaks.
+pub const REDUCED_LEN: usize = 64;
+/// A window must carry at least this many exact (non-wildcard) bytes to count
+/// as discriminative; a heavily relocation-masked window is mostly `??` and
+/// says little about the code.
+const MIN_EXACT: usize = 16;
+
+/// A masked atom reduced to a discriminative window (see [`Corpus::reduce_atom`]).
+#[derive(Debug, Clone)]
+pub struct ReducedAtom {
+    /// Offset of the window within the original maximal atom.
+    pub start_offset: usize,
+    /// Length of the original maximal (whole-function) atom.
+    pub orig_len: usize,
+    /// Exact (non-wildcard) byte count in the emitted window.
+    pub exact_bytes: usize,
+    pub bytes: Vec<MaskByte>,
+}
+
+fn count_exact(win: &[MaskByte]) -> usize {
+    win.iter().filter(|b| matches!(b, MaskByte::Exact(_))).count()
 }
 
 fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
@@ -106,6 +182,55 @@ mod tests {
                 .map(|(n, d)| (n.to_string(), d.to_vec()))
                 .collect(),
         }
+    }
+
+    fn exact_atom(bytes: &[u8]) -> MaskedAtom {
+        MaskedAtom {
+            fn_start: 0,
+            bytes: bytes.iter().map(|&b| MaskByte::Exact(b)).collect(),
+        }
+    }
+
+    #[test]
+    fn reduce_atom_shrinks_to_a_discriminative_window() {
+        let atom = exact_atom(&(0u8..100).collect::<Vec<_>>());
+        // Corpus shares nothing with the atom's byte range.
+        let c = corpus(vec![("benign", &[0xEE; 4096])]);
+        let r = c.reduce_atom(&atom).expect("a clean window exists");
+        assert_eq!(r.orig_len, 100);
+        assert_eq!(r.bytes.len(), REDUCED_LEN); // reduced from 100 → 64
+        assert_eq!(r.exact_bytes, REDUCED_LEN); // all exact in this atom
+    }
+
+    #[test]
+    fn reduce_atom_drops_when_every_window_collides() {
+        let seq: Vec<u8> = (0u8..100).collect();
+        let atom = exact_atom(&seq);
+        // The whole atom is present in a benign file, so every 64-byte window
+        // is a substring of it → all collide → not discriminative.
+        let c = corpus(vec![("benign", &seq)]);
+        assert!(c.reduce_atom(&atom).is_none());
+    }
+
+    #[test]
+    fn reduce_atom_keeps_a_short_atom_whole() {
+        let atom = exact_atom(&(0u8..40).collect::<Vec<_>>()); // shorter than REDUCED_LEN
+        let c = corpus(vec![("benign", &[0xEE; 256])]);
+        let r = c.reduce_atom(&atom).expect("clean");
+        assert_eq!(r.bytes.len(), 40);
+        assert_eq!(r.start_offset, 0);
+    }
+
+    #[test]
+    fn reduce_atom_drops_a_mostly_wildcard_atom() {
+        // 100 bytes, only 10 exact — no 64-byte window reaches MIN_EXACT.
+        let mut bytes = vec![MaskByte::Wildcard; 100];
+        for b in bytes.iter_mut().take(10) {
+            *b = MaskByte::Exact(0x42);
+        }
+        let atom = MaskedAtom { fn_start: 0, bytes };
+        let c = corpus(vec![("benign", &[0xEE; 256])]);
+        assert!(c.reduce_atom(&atom).is_none());
     }
 
     #[test]

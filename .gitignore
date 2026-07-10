@@ -2,6 +2,8 @@
 /.claude/
 /corpus/_build/
 /corpus/bin/
+/corpus/split_a/
+/corpus/split_b/
 /corpus/*.log
 /corpus/build_failures.log*
 /corpus/manifest.csv.*
