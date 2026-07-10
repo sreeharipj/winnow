@@ -2,7 +2,7 @@
 
 Generates YARA-X rules for stripped x86-64 Rust malware. One binary in, one rule for that binary out. Built on [unhusk](https://github.com/sreeharipj/unhusk), which isolates the author-written functions in a stripped Rust binary from panic metadata.
 
-> Experimental research project, single author. Validated on 3 usable in-the-wild Rust malware samples and a 75-binary benign Rust corpus, static analysis only, samples never executed. x86-64 ELF only. Numbers and interfaces change as evidence accumulates.
+> Experimental research project, single author. Validated on 3 usable in-the-wild Rust malware samples and a 154-binary benign Rust corpus measured on a held-out split, static analysis only, samples never executed. x86-64 ELF only. Numbers and interfaces change as evidence accumulates.
 
 unhusk answers "which bytes in this stripped Rust binary are the author's." winnow turns that answer into a signature. Because unhusk's inputs are attributed to the author by construction — panic-metadata provenance, not a heuristic — the bytes and strings winnow builds a rule from are the author's own, not stdlib and not dependency crates. A rule built only from author-unique material should not fire on unrelated software. winnow exists to find out whether that holds, and it is built so the claim has to survive a measurement instead of an argument.
 
@@ -20,7 +20,9 @@ The design claim — near-zero false positives from author-unique inputs — is 
 
 ## The benign corpus
 
-75 benign x86-64 ELF Rust binaries, release-built and stripped, spanning CLI, systems, async, and parallel tools — the shapes the malware set also takes. A subset had `.eh_frame` removed to mirror the boundary-degraded regime.
+154 benign x86-64 ELF Rust binaries, release-built and stripped, spanning CLI, systems, async, and parallel tools — the shapes the malware set also takes. A subset had `.eh_frame` removed to mirror the boundary-degraded regime. It began at 75 and was grown to 154; the only thing that growth buys is a tighter false-positive interval, so it costs nothing in the pipeline to keep growing it.
+
+The corpus is split into a filter half (A) and a disjoint held-out half (B). Rules are built against A, and their false positives are counted only on B. A rule's strings are selected for being *absent* from the filter corpus, so counting false positives on that same corpus is circular — no corpus binary can match a rule whose strings were chosen for being absent from it. Measuring on a held-out B that the filters never saw makes a clean number a measurement instead of a restatement of the filtering step.
 
 One trap, stated because it silently defeats the whole corpus: the binaries are built with `git clone` + `cargo build --release`, not `cargo install`. `cargo install` builds from `~/.cargo/registry/`, which rewrites the tool's own source paths to `registry/...`, and unhusk then classifies the author's own code as a dependency instead of User. A corpus built that way exercises the wrong code path — not the User-attribution path the malware rules rest on — and reports a meaningless number.
 
@@ -48,24 +50,30 @@ Six in-the-wild Rust malware samples were selected as signable. Three were not u
 | `01flip_x` | 01flip | Zero attributed functions — `--remap-path-prefix` removed the panic paths, so unhusk has nothing to attribute. Tier 0. |
 | `p2pinfect_x` | P2PInfect | No ELF section headers (raw/partial dump). unhusk finds no `.rela.dyn` to read. |
 
-The three usable samples each produced a rule:
+The three usable samples each produced a rule. Each self-fires on its own sample, and each was scanned against the 76-binary held-out split B:
 
-| Sample | Family | Self-fires | Benign FPs (of 75) |
+| Sample | Family | Rule earned | Benign FPs on held-out B (76) |
 |---|---|:---:|---:|
-| `krusty_x` | KrustyLoader | yes | 0 |
-| `akira_v2_x` | Akira | yes | 0 |
-| `blackcat_sphynx_x` | BlackCat Sphynx | yes | 0 |
+| `krusty_x` | KrustyLoader | Tier 2 | 0 |
+| `akira_v2_x` | Akira | Tier 1 (two-factor) | 0 |
+| `blackcat_sphynx_x` | BlackCat Sphynx | Tier 2 | 0 |
 
-Zero false positives across three rules and 75 benign binaries. The scan was sanity-checked against a trivially-true rule first, which matched all 75 — confirming the zero is a real result and not a broken scanner reporting no matches for the wrong reason.
+Zero false positives across three rules and 76 held-out benign binaries — a rule-of-three 95% upper bound of about 3.9% at this N (it was about 8% at B=36, before the corpus was grown). An early scan was sanity-checked against a trivially-true rule, which matched every corpus binary, confirming a zero is a real result and not a broken scanner reporting no matches for the wrong reason.
 
-## Tier 1 was built and not earned
+## Tier 1: earned once, declined twice
 
-The Tier 1 apparatus was built in full and gated on the corpus:
+The Tier 1 apparatus pairs a masked-hex code factor with an independent behavioral string, and it is gated on the corpus:
 
-- **Masked-hex.** Masks relocation-patched displacements, 64-bit absolute immediates, and the bytes an actual `.rela.dyn` relocation patches, located via iced-x86 constant offsets — not blanket masking. Every masked atom across the corpus was discriminative, zero collisions, and every one still self-fired: the masking is specific without breaking correctness.
-- **Behavioral-string extraction.** The first version had a real bug. It paired any LEA in an 8-instruction lookback window and sliced the underlying bytes, gluing unrelated strings into plausible-looking garbage. (unhusk uses a similar lookback safely, but only because it has type-shape and boundary checks that general printable-string extraction does not.) Caught by disassembling a flagged function by hand and finding the extraction did not match the instructions. Fixed by requiring strict zero-gap `lea;mov` adjacency.
+- **Masked-hex.** Masks relocation-patched displacements, 64-bit absolute immediates, and the bytes an actual `.rela.dyn` relocation patches, located via iced-x86 constant offsets — not blanket masking. Each atom is then reduced from the whole function to its most discriminative 64-byte window and checked against the corpus: a 64-byte window can collide where a whole-function atom effectively cannot, so the reduction is a real specificity test rather than a free zero. Across the corpus every kept atom was discriminative with zero collisions and still self-fired.
+- **Behavioral-string extraction.** The first version had a real bug: it paired any LEA in an 8-instruction lookback window and sliced the underlying bytes, gluing unrelated strings into plausible-looking garbage. (unhusk uses a similar lookback safely, but only because it has type-shape and boundary checks that general printable-string extraction does not.) It was caught by disassembling a flagged function by hand. The obvious fix — requiring the length to be the literal next instruction after the `lea` — turned out to recover *zero* strings on all three real samples, because rustc/LLVM routinely separates the length from the pointer load (argument setup in between, `push imm; pop`, or storing the length as one half of a fat pointer). The working version is a short register-dataflow window that stops the moment the pointer register is redefined, which is what actually prevents a stale `lea` from being spliced onto an unrelated later length.
 
-With the corrected, honest heuristic, none of the three samples produced a qualifying Tier 1 rule. This is not a failure. It confirms the design's own prediction: malware author code is small, unhusk's recall is partial, STRONG is a subset of that, and a clean independent behavioral string in `.rodata` is usually absent — malware frequently encrypts or runtime-decrypts exactly those strings. Tier 2 is the realistic workhorse; Tier 1 is the fortunate case. The apparatus to manufacture a Tier 1 hit existed and was correct, and the measurement said none was earned.
+On the current set, one sample earns Tier 1 and two decline:
+
+- **Akira** earns it — 3 masked-code atoms and 22 rare behavioral strings (`/tmp/stop_vms.sh`, `/akiranew.txt`, a hardcoded token, ESXi paths), drawn from disjoint functions, with zero false positives on the 76 held-out binaries.
+- **BlackCat Sphynx** has a single STRONG function. Its code atom and its one behavioral string (`esxcli … vm process list`) come from that same function, so no disjoint pairing exists; it declines to Tier 2. One function cannot corroborate itself.
+- **KrustyLoader** harvests only generic std panic candidates, all common in the corpus, so none survive rarity filtering; it declines to Tier 2.
+
+Two declining is the design's own prediction: malware author code is small, unhusk's recall is partial, STRONG is a subset of that, and a clean independent behavioral string in `.rodata` is often absent — malware frequently encrypts or runtime-decrypts exactly those strings. Tier 2 is the realistic workhorse; Tier 1 is the fortunate case. What changed from an earlier state of this project is that the behavioral-string extraction now recovers real author strings, so the fortunate case is no longer empty.
 
 ## The operational envelope
 
@@ -73,8 +81,8 @@ Half the signable set was unusable, and the three failures are not noise — the
 
 ## What is claimed, and what is not
 
-- **Claimed:** across the three usable samples, zero false positives against a 75-binary benign Rust corpus, with the false-positive rate measured once rather than per family.
-- **Not claimed:** a wild false-positive rate. Three rules and 75 benign binaries is a start, not a representative study. n is small and the corpus is curated.
+- **Claimed:** across the three usable samples, zero false positives on a 76-binary held-out benign split (rule-of-three 95% upper bound ~3.9%), with the false-positive rate measured once rather than per family. One sample (Akira) earns the two-factor Tier 1 rule; the other two hold at Tier 2.
+- **Not claimed:** a wild false-positive rate. Three rules against a 154-binary curated corpus is a start, not a representative study. n is small and the corpus is curated toward common crates.
 - **Not claimed:** family or version coverage. Each rule fingerprints one binary by design.
 
 ## Usage
@@ -100,21 +108,25 @@ The headline numbers above are not meant to be taken on faith.
 ```sh
 scripts/build_corpus.sh          # git-clone + cargo build the benign corpus into corpus/bin/
                                   # (manifest committed at corpus/manifest.csv)
-scripts/measure.sh               # generates Tier 2 rules for the malware samples and
-                                  # scans them against the full corpus -> results/fp_table.md
+scripts/measure_holdout.sh       # split the corpus into filter half A and held-out half B,
+                                  # build rules against A, count false positives only on B
+                                  # -> results/fp_holdout.md and results/tier1_report.md
+scripts/measure_independence.sh  # decompose each earned Tier 1 rule into code-only and
+                                  # string-only variants, scan each against B
+                                  # -> results/fp_independence.md
 ```
 
-`results/tier1_report.md` records the Tier 1 attempt (per-atom corpus-collision checks and
-the reason Tier 1 wasn't earned for each sample). `corpus/manifest.csv` lists every benign
-binary's source repo, commit, and build flags — the corpus itself isn't committed, only the
-recipe to rebuild it.
+`results/tier1_report.md` records the Tier 1 attempt for each sample (per-atom corpus-collision
+checks, which behavioral strings were kept or dropped, the disjoint-function partition, and the
+reason Tier 1 was or wasn't earned). `corpus/manifest.csv` lists every benign binary's source
+repo, commit, and build flags — the corpus itself isn't committed, only the recipe to rebuild it.
 
 ## Limitations
 
 - The result rests on n=3 usable samples. The three unusable ones show how easily the input side breaks.
-- Tier 1 is unearned on the current set. The multi-factor rule is designed and validated as machinery but has not fired on real malware, because the independent behavioral string it needs is usually absent or encrypted.
+- Tier 1 is earned by one of the three (Akira) and declined by the other two. The multi-factor rule now fires on real malware, but on a thin base — a single earning sample. The independent behavioral string it needs is often absent or encrypted, so most samples reach Tier 2, not Tier 1.
 - winnow inherits every one of unhusk's limits: x86-64 ELF only; defeated by packing, `--remap-path-prefix`, and `panic_immediate_abort`; partial recall; lower precision on async-heavy code, which malware skews toward.
-- The benign corpus is curated toward common crates, not sampled from a representative population of Rust software. The false-positive number is only as good as the corpus is representative.
+- The benign corpus is 154 binaries curated toward common crates, not sampled from a representative population of Rust software. The false-positive number is only as good as the corpus is representative.
 
 ## Relationship to unhusk
 
