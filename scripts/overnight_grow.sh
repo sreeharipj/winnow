@@ -14,21 +14,6 @@
 # per-crate cap, and a 6-hour cap on the whole build phase.
 set -uo pipefail
 
-# Keep the machine awake for the whole unattended run: an idle/auto suspend would
-# freeze and effectively kill the build. Re-exec under systemd-inhibit if it is
-# available and actually works (probe first so a failure can't abort the run).
-# The guard env var prevents an infinite re-exec loop.
-if [[ -z "${WINNOW_INHIBITED:-}" ]]; then
-  export WINNOW_INHIBITED=1
-  if command -v systemd-inhibit >/dev/null 2>&1 && \
-     systemd-inhibit --what=sleep:idle --who=winnow --why=probe true 2>/dev/null; then
-    echo "overnight_grow: re-exec under systemd-inhibit (blocking sleep:idle)"
-    exec systemd-inhibit --what=sleep:idle --who=winnow \
-      --why="winnow overnight corpus grow" --mode=block bash "$0" "$@"
-  fi
-  echo "overnight_grow: systemd-inhibit unavailable; running without suspend guard"
-fi
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 LOG="$ROOT/corpus/overnight.log"
@@ -43,6 +28,22 @@ GROW_DEADLINE_SECS="${GROW_DEADLINE_SECS:-21600}"
 
 exec > >(tee -a "$LOG") 2>&1
 echo "=== overnight_grow START $(date -u +%FT%TZ) | PBUILD=$PBUILD JOBS=$JOBS BUILD_TIMEOUT=${BUILD_TIMEOUT}s deadline=${GROW_DEADLINE_SECS}s ==="
+
+# Hold an idle-suspend inhibitor for the life of this run (idle-suspend killed an
+# earlier run). Use a BACKGROUNDED lock, not a re-exec: re-exec'ing under
+# systemd-inhibit detaches this process from the parent's tracking so the run
+# becomes invisible/untracked. The backgrounded lock keeps THIS pid the tracked
+# one. The lock is released by the EXIT trap when the run ends.
+INHIBIT_PID=""
+if command -v systemd-inhibit >/dev/null 2>&1; then
+  systemd-inhibit --what=sleep:idle --who=winnow --why="winnow overnight corpus grow" \
+    --mode=block sleep "$GROW_DEADLINE_SECS" &
+  INHIBIT_PID=$!
+  trap '[[ -n "$INHIBIT_PID" ]] && kill "$INHIBIT_PID" 2>/dev/null' EXIT
+  echo "overnight_grow: holding sleep:idle inhibitor (pid $INHIBIT_PID) for the run"
+else
+  echo "overnight_grow: systemd-inhibit unavailable; no suspend guard"
+fi
 
 before_bins=$(ls "$ROOT/corpus/bin" 2>/dev/null | wc -l)
 before_rows=$(tail -n +2 "$MANIFEST" | wc -l)
