@@ -99,7 +99,11 @@ ub=$(awk -v n="$NB" 'BEGIN{ if(n==0)print "n/a"; else printf "%.1f%%", 300.0/n }
   echo ""
   echo "## Build failures (grow batch)"
   echo '```'
-  cat "$ROOT/corpus/build_failures.log.${GROW_START}-"* 2>/dev/null | sed 's/^/  /' | head -80
+  # Only real failure markers -- the faillog also captures cargo's normal stderr
+  # (Compiling..., Blocking waiting for file lock), which are not failures.
+  grep -hE 'CLONE FAILED|BUILD FAILED|BINARY NOT FOUND|SKIPPED \(low disk' \
+    "$ROOT/corpus/build_failures.log.${GROW_START}-"* 2>/dev/null | sort -u | sed 's/^/  /' \
+    || echo "  (none)"
   echo '```'
   echo ""
   echo "## results/fp_holdout.md"

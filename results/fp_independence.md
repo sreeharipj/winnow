@@ -1,6 +1,6 @@
-# Phase 3b — factor-independence measurement (held-out corpus B, |B|=36)
+# Phase 3b — factor-independence measurement (held-out corpus B, |B|=76)
 
-Generated 2026-07-10T16:59:55Z.
+Generated 2026-07-10T19:36:47Z.
 
 For each earned Tier 1 rule, the emitted rule (joint) is decomposed into its
 two single-factor variants: the other factor's condition clause and its string
@@ -14,9 +14,9 @@ claim, not an assumed multiplicative bound.
 
 | factor | benign hits on B | marginal FP | 95% upper bound |
 |---|---|---|---|
-| code-only $mcode*      | 0 | 0/36 | 8.3% |
-| string-only $behavior* | 0 | 0/36 | 8.3% |
-| joint (emitted rule)   | 0 | 0/36 | 8.3% |
+| code-only $mcode*      | 0 | 0/76 | 3.9% |
+| string-only $behavior* | 0 | 0/76 | 3.9% |
+| joint (emitted rule)   | 0 | 0/76 | 3.9% |
 
 - product of marginals (a/|B|)(b/|B|) = 0.0000; expected-joint-under-independence a·b/|B| = 0.00 hits.
 - empirical bound c ≤ a·b/|B|: **holds** (joint 0 ≤ 0.00).
