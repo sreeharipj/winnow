@@ -22,6 +22,14 @@ MANIFEST="$ROOT/corpus/manifest.csv"
 FAILLOG="$ROOT/corpus/build_failures.log"
 UNHUSK="/home/user/Videos/unhusk/target/release/unhusk"
 
+# Tunables (defaults preserve the original behaviour). Overridable via env for
+# unattended runs on RAM-constrained hosts: PBUILD=1 avoids concurrent heavy
+# links (the OOM cause), JOBS controls per-crate cargo parallelism, and
+# BUILD_TIMEOUT hard-caps a single crate so one wedged build can't stall a batch.
+PBUILD="${PBUILD:-2}"
+JOBS="${JOBS:-4}"
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-86400}"
+
 mkdir -p "$WORK" "$BIN"
 
 # name;git_url;bin_name;category
@@ -104,6 +112,59 @@ ENTRIES=(
   "hyperjson-skip;SKIP;skip;skip"
   "wthrr;https://github.com/TheJokr/wthrr-the-weathercli;wthrr;async"
   "trippy;https://github.com/fujiapple852/trippy;trip;async"
+  # --- grow batch 2026-07-10 (indices >= 77): more real Rust CLIs to enlarge the
+  # held-out FP corpus B. Biased to well-known, mostly-pure-Rust tools with known
+  # binary names; failures are non-fatal (continue-on-fail) and just don't land. ---
+  "vivid;https://github.com/sharkdp/vivid;vivid;cli"
+  "numbat;https://github.com/sharkdp/numbat;numbat;cli"
+  "diskus;https://github.com/sharkdp/diskus;diskus;parallel"
+  "jless;https://github.com/PaulJuliusMartinez/jless;jless;cli"
+  "htmlq;https://github.com/mgdm/htmlq;htmlq;cli"
+  "xsv;https://github.com/BurntSushi/xsv;xsv;parallel"
+  "b3sum;https://github.com/BLAKE3-team/BLAKE3;b3sum;parallel"
+  "sad;https://github.com/ms-jpq/sad;sad;cli"
+  "kibi;https://github.com/ilai-deutel/kibi;kibi;cli"
+  "rink;https://github.com/tiffany352/rink-rs;rink;cli"
+  "genact;https://github.com/svenstaro/genact;genact;cli"
+  "mprocs;https://github.com/pvolok/mprocs;mprocs;cli"
+  "onefetch;https://github.com/o2sh/onefetch;onefetch;parallel"
+  "hgrep;https://github.com/rhysd/hgrep;hgrep;cli"
+  "taplo;https://github.com/tamasfe/taplo;taplo;cli"
+  "stylua;https://github.com/JohnnyMorganz/StyLua;stylua;cli"
+  "dprint;https://github.com/dprint/dprint;dprint;parallel"
+  "serie;https://github.com/lusingander/serie;serie;cli"
+  "joshuto;https://github.com/kamiyaa/joshuto;joshuto;cli"
+  "gitui;https://github.com/extrawurst/gitui;gitui;cli"
+  "skim;https://github.com/skim-rs/skim;sk;cli"
+  "television;https://github.com/alexpasmantier/television;tv;cli"
+  "cotp;https://github.com/replydev/cotp;cotp;cli"
+  "fnm;https://github.com/Schniz/fnm;fnm;async"
+  "mise;https://github.com/jdx/mise;mise;cli"
+  "atuin;https://github.com/atuinsh/atuin;atuin;async"
+  "pueue;https://github.com/Nukesor/pueue;pueue;async"
+  "slumber;https://github.com/LucasPickering/slumber;slumber;async"
+  "gitoxide;https://github.com/GitoxideLabs/gitoxide;gix;parallel"
+  "ruff;https://github.com/astral-sh/ruff;ruff;parallel"
+  "uv;https://github.com/astral-sh/uv;uv;async"
+  "helix;https://github.com/helix-editor/helix;hx;cli"
+  "rustic;https://github.com/rustic-rs/rustic;rustic;async"
+  "kalker;https://github.com/PaddiM8/kalker;kalker;cli"
+  "oxipng;https://github.com/shssoichiro/oxipng;oxipng;parallel"
+  "git-graph;https://github.com/mlange-42/git-graph;git-graph;cli"
+  "macchina;https://github.com/Macchina-CLI/macchina;macchina;cli"
+  "lolcrab;https://github.com/mazznoer/lolcrab;lolcrab;cli"
+  "zet;https://github.com/yarrow/zet;zet;cli"
+  "bkt;https://github.com/dimo414/bkt;bkt;cli"
+  "committed;https://github.com/crate-ci/committed;committed;cli"
+  "ripsecrets;https://github.com/sirwart/ripsecrets;ripsecrets;cli"
+  "static-web-server;https://github.com/static-web-server/static-web-server;static-web-server;async"
+  "code2prompt;https://github.com/mufeedvh/code2prompt;code2prompt;cli"
+  "eva;https://github.com/nerdypepper/eva;eva;cli"
+  "sccache;https://github.com/mozilla/sccache;sccache;parallel"
+  "amp;https://github.com/jmacdonald/amp;amp;cli"
+  "yazi;https://github.com/sxyazi/yazi;yazi;async"
+  "mdq;https://github.com/yshavit/mdq;mdq;cli"
+  "nushell;https://github.com/nushell/nushell;nu;cli"
 )
 
 start="${1:-0}"
@@ -151,8 +212,8 @@ build_one() {
 
   # Some repos are workspaces; try building at root first, then search for
   # the binary anywhere under target/release.
-  if ! (cd "$dir" && cargo build --release --locked -j4 >/dev/null 2>>"$FAILLOG.$start-$end"); then
-    if ! (cd "$dir" && cargo build --release -j4 >/dev/null 2>>"$FAILLOG.$start-$end"); then
+  if ! (cd "$dir" && timeout -k 30 "$BUILD_TIMEOUT" cargo build --release --locked -j"$JOBS" >/dev/null 2>>"$FAILLOG.$start-$end"); then
+    if ! (cd "$dir" && timeout -k 30 "$BUILD_TIMEOUT" cargo build --release -j"$JOBS" >/dev/null 2>>"$FAILLOG.$start-$end"); then
       echo "$name: BUILD FAILED" >> "$FAILLOG.$start-$end"
       rm -rf "$dir/target"
       return 1
@@ -201,9 +262,9 @@ build_one() {
   echo "OK: $name (strong=$strong)"
 }
 export -f build_one
-export WORK BIN MANIFEST FAILLOG UNHUSK start end
+export WORK BIN MANIFEST FAILLOG UNHUSK start end JOBS BUILD_TIMEOUT
 
 printf '%s\n' "${ENTRIES[@]:$start:$((end-start))}" | \
-  xargs -I{} -P 2 bash -c 'build_one "$@"' _ {}
+  xargs -I{} -P "$PBUILD" bash -c 'build_one "$@"' _ {}
 
 echo "Batch $start-$end done. See $MANIFEST.$start-$end and $FAILLOG.$start-$end"
