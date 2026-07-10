@@ -14,6 +14,21 @@
 # per-crate cap, and a 6-hour cap on the whole build phase.
 set -uo pipefail
 
+# Keep the machine awake for the whole unattended run: an idle/auto suspend would
+# freeze and effectively kill the build. Re-exec under systemd-inhibit if it is
+# available and actually works (probe first so a failure can't abort the run).
+# The guard env var prevents an infinite re-exec loop.
+if [[ -z "${WINNOW_INHIBITED:-}" ]]; then
+  export WINNOW_INHIBITED=1
+  if command -v systemd-inhibit >/dev/null 2>&1 && \
+     systemd-inhibit --what=sleep:idle --who=winnow --why=probe true 2>/dev/null; then
+    echo "overnight_grow: re-exec under systemd-inhibit (blocking sleep:idle)"
+    exec systemd-inhibit --what=sleep:idle --who=winnow \
+      --why="winnow overnight corpus grow" --mode=block bash "$0" "$@"
+  fi
+  echo "overnight_grow: systemd-inhibit unavailable; running without suspend guard"
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 LOG="$ROOT/corpus/overnight.log"

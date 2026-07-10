@@ -214,6 +214,21 @@ build_one() {
   IFS=';' read -r name url binname category <<< "$entry"
   [[ "$url" == "SKIP" ]] && return 0
 
+  # Resumable: if this binary was already built (e.g. by an earlier interrupted
+  # run), re-record its manifest row and skip the rebuild, so the batch is cheap
+  # to resume after an interruption instead of recompiling everything. Bins are
+  # only copied out after a fully successful build, so an existing one is complete.
+  if [[ -f "$BIN/$name" ]]; then
+    local rsha rstrong="?"
+    rsha="$(git -C "$WORK/$name" rev-parse --short HEAD 2>/dev/null || echo cached)"
+    if [[ -x "$UNHUSK" ]]; then
+      rstrong="$("$UNHUSK" "$BIN/$name" --precision --json 2>/dev/null | grep -o '"tier"' | wc -l | tr -d ' ')"
+    fi
+    echo "$name,$url,$rsha,$binname,$category,false,$rstrong" >> "$MANIFEST.$start-$end"
+    echo "SKIP(exists): $name"
+    return 0
+  fi
+
   # Disk-space guard: this host runs near-full from unrelated data. Bail
   # before starting a multi-hundred-MB build if headroom is too thin.
   local avail_kb
