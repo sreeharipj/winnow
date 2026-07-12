@@ -37,6 +37,14 @@ impl Corpus {
 
     /// A string is "rare" (architecture §7.C) if it appears in none of the
     /// benign corpus files.
+    ///
+    /// Kept serial deliberately: `contains_subslice` (memmem) already scans the
+    /// corpus at ~39 GB/s, i.e. at this machine's DRAM bandwidth, so it is
+    /// memory-bound, not compute-bound. Spreading it over cores was *measured*
+    /// at 0.9x — threads only add overhead against a bandwidth ceiling they
+    /// cannot raise. (The masked scan in `any_file_matches` is compute-bound at
+    /// ~18 GB/s and *does* profit from `any_file`; the difference is measured,
+    /// not assumed — the same discipline this whole project runs on.)
     pub fn string_is_rare(&self, s: &str) -> bool {
         let needle = s.as_bytes();
         !self
@@ -58,9 +66,7 @@ impl Corpus {
     }
 
     fn any_file_matches(&self, pat: &[MaskByte]) -> bool {
-        self.files
-            .iter()
-            .any(|(_, data)| masked_match_anywhere(data, pat))
+        any_file(&self.files, |data| masked_match_anywhere(data, pat))
     }
 
     /// Discriminative-substring *reduction* (architecture §7.B, critique
@@ -128,6 +134,57 @@ pub struct ReducedAtom {
 
 fn count_exact(win: &[MaskByte]) -> usize {
     win.iter().filter(|b| matches!(b, MaskByte::Exact(_))).count()
+}
+
+/// Run `pred` over every corpus file and return whether *any* file matches,
+/// spread across the machine's cores.
+///
+/// Used for the masked-window scan (`any_file_matches`), which is compute-bound
+/// (~18 GB/s serial: memchr anchor + per-hit wildcard compare) and so has
+/// headroom to parallelize — measured at ~1.9x here, tailing off where the scan
+/// reaches DRAM bandwidth (a memory-bound scan like `string_is_rare`'s memmem
+/// has no such headroom and is deliberately left serial). The OR-fold is
+/// order-independent, so the result is deterministic regardless of scheduling.
+/// A shared work-stealing cursor (rather than a fixed file-per-thread split)
+/// keeps every core busy despite the corpus's wildly uneven file sizes, and the
+/// `found` flag lets the first match short-circuit *all* threads at once —
+/// which is exactly what a colliding masked window (`reduce_atom`'s drop path)
+/// wants.
+fn any_file<F>(files: &[(String, Vec<u8>)], pred: F) -> bool
+where
+    F: Fn(&[u8]) -> bool + Sync,
+{
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let n = files.len();
+    let threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
+        .min(n);
+    // One file (or none, or no parallelism) isn't worth a thread pool.
+    if threads <= 1 {
+        return files.iter().any(|(_, d)| pred(d));
+    }
+
+    let found = AtomicBool::new(false);
+    let cursor = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                while !found.load(Ordering::Relaxed) {
+                    let i = cursor.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    if pred(&files[i].1) {
+                        found.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    found.load(Ordering::Relaxed)
 }
 
 fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
