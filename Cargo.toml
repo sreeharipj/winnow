@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 object = { version = "0.36", default-features = false, features = ["read", "elf", "std"] }
 iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "op_code_info", "instr_info"] }
+memchr = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

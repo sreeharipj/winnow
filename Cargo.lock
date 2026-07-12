@@ -430,6 +430,7 @@ dependencies = [
  "anyhow",
  "clap",
  "iced-x86",
+ "memchr",
  "object",
  "serde",
  "serde_json",
