@@ -1,8 +1,5 @@
-/// Discriminative-substring reduction against the benign corpus (architecture
-/// §7.C rarity filter for non-panic strings; critique finding 2's demand that
-/// masked-hex specificity be *measured* against a background set, not
-/// asserted). This is the module that only exists because Phase 0 built the
-/// corpus first — the whole reason this project is ordered the way it is.
+/// Measures candidate signatures against the benign corpus: string rarity and
+/// discriminative-substring reduction of masked-hex atoms.
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -19,9 +16,8 @@ impl Corpus {
         for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?
         {
             let entry = entry?;
-            // `Path::is_file` follows symlinks, so a corpus directory built
-            // from symlinks (as the A/B holdout split is) loads correctly;
-            // `entry.file_type()` would report the symlink itself and skip it.
+            // `Path::is_file` follows symlinks, so a symlink-built corpus (the
+            // A/B holdout split) loads correctly; `file_type()` would skip it.
             if !entry.path().is_file() {
                 continue;
             }
@@ -45,9 +41,8 @@ impl Corpus {
             .any(|(_, data)| contains_subslice(data, needle))
     }
 
-    /// Names of corpus files a masked-hex atom collides with. Empty = the
-    /// atom is discriminative against this corpus. Retained as a diagnostic
-    /// (and exercised by tests); the emission path uses [`Corpus::reduce_atom`].
+    /// Names of corpus files a masked-hex atom collides with (empty = discriminative).
+    /// A diagnostic exercised by tests; the emission path uses [`Corpus::reduce_atom`].
     #[allow(dead_code)]
     pub fn masked_atom_collisions(&self, atom: &MaskedAtom) -> Vec<String> {
         self.files
@@ -63,20 +58,12 @@ impl Corpus {
             .any(|(_, data)| masked_match_anywhere(data, pat))
     }
 
-    /// Discriminative-substring *reduction* (architecture §7.B, critique
-    /// finding 2), done for real rather than asserted.
-    ///
-    /// The maximal atom — a whole masked function, hundreds to tens of
-    /// thousands of bytes — is trivially absent from any benign file, so
-    /// checking *it* for collisions stamps every atom "discriminative" for
-    /// free and proves nothing. The honest question is how *little* byte
-    /// specificity the corpus actually demands: we reduce the atom to its most
-    /// exact-byte-dense [`REDUCED_LEN`]-byte window and check *that*, where a
-    /// benign collision is genuinely possible. Candidate windows are tried
-    /// strongest-first (most exact bytes), so the first collision-free hit is
-    /// also the most discriminative. `None` means no window with at least
-    /// [`MIN_EXACT`] exact bytes is free of benign collisions — the function's
-    /// code is not discriminative at this granularity and the caller drops it.
+    /// Reduce a masked atom to its most exact-byte-dense [`REDUCED_LEN`]-byte
+    /// window that is free of benign collisions. The whole-function atom is
+    /// trivially collision-free and proves nothing, so we test the reduced
+    /// window where a collision is actually possible. Windows are tried
+    /// strongest-first, so the first survivor is the most discriminative.
+    /// `None` = no window with ≥ [`MIN_EXACT`] exact bytes survives; caller drops it.
     pub fn reduce_atom(&self, atom: &MaskedAtom) -> Option<ReducedAtom> {
         let n = atom.bytes.len();
         let win_len = REDUCED_LEN.min(n);
@@ -104,14 +91,11 @@ impl Corpus {
     }
 }
 
-/// Target length of a reduced atom. 64 bytes of mostly-exact machine code is
-/// specific enough that a benign collision is near-impossible in practice, yet
-/// short enough to survive an instruction edit elsewhere in the function —
-/// unlike the whole-function maximal atom, which any single change breaks.
+/// Reduced-atom length: 64 bytes of mostly-exact code is specific enough that a
+/// benign collision is near-impossible, yet short enough to survive an edit
+/// elsewhere in the function.
 pub const REDUCED_LEN: usize = 64;
-/// A window must carry at least this many exact (non-wildcard) bytes to count
-/// as discriminative; a heavily relocation-masked window is mostly `??` and
-/// says little about the code.
+/// Minimum exact (non-wildcard) bytes for a window to count as discriminative.
 const MIN_EXACT: usize = 16;
 
 /// A masked atom reduced to a discriminative window (see [`Corpus::reduce_atom`]).
@@ -134,28 +118,18 @@ fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || needle.len() > hay.len() {
         return false;
     }
-    // SIMD substring search (Two-Way + memchr prefilter). The corpus is ~1.5GB
-    // and `string_is_rare` scans all of it per candidate string; the old
-    // `hay.windows(n).any(|w| w == needle)` ran at ~460 MB/s (a naive
-    // byte-by-byte compare at every offset), memmem clears ~37 GB/s on the same
-    // data — an ~80x speedup, measured, for identical results.
+    // SIMD substring search; ~80x over `windows().any()` on the ~1.5GB corpus.
     memchr::memmem::find(hay, needle).is_some()
 }
 
 /// Wildcard-aware substring search: is `pat` present anywhere in `hay`, with
 /// `MaskByte::Wildcard` matching any byte?
 ///
-/// The prefilter is the pattern's LONGEST contiguous run of exact bytes, handed
-/// to `memchr::memmem` (SIMD). Any real match must contain that run verbatim, so
-/// memmem enumerates every candidate window start and the full wildcard-aware
-/// compare runs only there. Even a few exact bytes make the run specific enough
-/// that essentially nothing in ~1.5GB survives the prefilter by chance, so the
-/// scan is memory-bound: ~40 GB/s, measured. The earlier single-byte anchor
-/// (`memchr`) let ~1/256 of positions reach the compare and was compute-bound at
-/// ~18 GB/s; a longer needle is simply a stronger prefilter. When the exact
-/// bytes are so scattered that the longest run is one byte, this degrades to
-/// exactly that memchr behavior. An all-wildcard pattern discriminates nothing
-/// and never matches.
+/// Prefilters on the pattern's longest contiguous run of exact bytes via
+/// `memchr::memmem` (SIMD): any real match must contain that run, so memmem
+/// enumerates candidate window starts and the full compare runs only there.
+/// A run of a few exact bytes makes the scan memory-bound (~40 GB/s, measured).
+/// An all-wildcard pattern discriminates nothing and never matches.
 fn masked_match_anywhere(hay: &[u8], pat: &[MaskByte]) -> bool {
     if pat.is_empty() || pat.len() > hay.len() {
         return false;
@@ -167,13 +141,12 @@ fn masked_match_anywhere(hay: &[u8], pat: &[MaskByte]) -> bool {
 
     let last_start = hay.len() - pat.len();
     let finder = memchr::memmem::Finder::new(&run);
-    // memmem yields non-overlapping matches, but overlapping run occurrences can
-    // each seed a distinct window start, so step by one past each hit to see all.
+    // Step one past each hit (not memmem's non-overlapping iterator): overlapping
+    // run occurrences can each seed a distinct window start.
     let mut from = 0;
     while let Some(rel) = finder.find(&hay[from..]) {
-        let hit = from + rel; // hay index where the exact run begins
-        // The run sits at pat[run_off..], so a full match anchored here would
-        // begin at hay index `hit - run_off`.
+        let hit = from + rel; // hay index where the run begins
+        // The run sits at pat[run_off..], so the window starts at hit - run_off.
         if let Some(start) = hit.checked_sub(run_off) {
             if start <= last_start
                 && pat.iter().enumerate().all(|(i, pb)| match pb {
@@ -189,9 +162,8 @@ fn masked_match_anywhere(hay: &[u8], pat: &[MaskByte]) -> bool {
     false
 }
 
-/// The longest contiguous run of `Exact` bytes in `pat`, as `(offset, bytes)`;
-/// `None` iff `pat` is all wildcards. Ties keep the first (leftmost) run — any
-/// maximal run is an equally valid prefilter, so the choice is arbitrary.
+/// The longest contiguous run of `Exact` bytes in `pat`, as `(offset, bytes)`,
+/// leftmost on ties; `None` iff `pat` is all wildcards.
 fn longest_exact_run(pat: &[MaskByte]) -> Option<(usize, Vec<u8>)> {
     let mut best: Option<(usize, usize)> = None; // (start, len)
     let mut i = 0;

@@ -14,9 +14,8 @@ use clap::Parser;
 use sha2::{Digest, Sha256};
 
 /// Winnow — automated YARA-X signature generator for stripped Rust malware.
-/// Phase 1: thinnest Tier-2 (strings-dominant) rule generator.
-/// Phase 3 (--tier1): masked-hex + independent behavioral-data flagship,
-/// gated on the benign corpus this project measures itself against.
+/// Emits a Tier 2 (strings-dominant) rule, and with --tier1 the masked-hex +
+/// behavioral-data flagship, gated on a benign corpus.
 #[derive(Parser)]
 #[command(name = "winnow", version, about)]
 struct Args {
@@ -31,11 +30,9 @@ struct Args {
     #[arg(long)]
     unhusk_bin: Option<PathBuf>,
 
-    /// Also attempt the Tier 1 flagship rule (architecture §5, Phase 3):
-    /// masked-hex code substring-reduced against the benign corpus, AND an
-    /// independent non-panic author string rarity-filtered against it.
-    /// Requires --corpus-dir. Only earned (and only written) if both
-    /// factors survive; otherwise winnow explains why and keeps Tier 2.
+    /// Also attempt the Tier 1 flagship rule: masked-hex code (substring-reduced
+    /// against the corpus) AND an independent rarity-filtered author string.
+    /// Requires --corpus-dir; only written if both factors survive.
     #[arg(long)]
     tier1: bool,
 
@@ -61,10 +58,8 @@ fn main() -> Result<()> {
         .filter(|f| f.tier == "strong")
         .collect();
 
-    // Tier 0 — refuse. No STRONG-tier author functions at all: unhusk saw a
-    // packed binary, aggressive `--remap-path-prefix`, or genuinely no
-    // reachable user panic evidence. A tool that declines beats one that
-    // always emits something (architecture §5, non-negotiable #5).
+    // Tier 0 — refuse rather than emit something unearned: no STRONG-tier
+    // author functions (packed, path-remapped, or no panic evidence).
     if strong.is_empty() {
         eprintln!(
             "winnow: TIER 0 REFUSE — no STRONG-tier author functions in {}",
@@ -92,10 +87,8 @@ fn main() -> Result<()> {
         code_atoms.extend(code::extract_code_atoms(text, f.start, f.end));
     }
 
-    // Tier 2 needs the string factor. Phase 1 does not implement the Tier 3
-    // (code-only) fallback — refuse rather than emit a code-only rule that
-    // hasn't earned its FP argument. This is the `01flip_x` / remap-path
-    // case (architecture §5, Tier 3) surfacing here as an honest refusal.
+    // Tier 2 needs the string factor. The code-only (Tier 3) fallback isn't
+    // implemented, so refuse rather than emit an unearned rule (remap-path case).
     if anchor_strings.is_empty() {
         eprintln!(
             "winnow: STRONG functions carry no anchor_files in {} — strings-weak (likely \
@@ -174,11 +167,9 @@ fn run_tier1(
 
     let rodata = elf.section(".rodata");
 
-    // Masked-hex code factor, substring-REDUCED against the corpus. The whole
-    // masked function is trivially collision-free (nothing benign is that long);
-    // reduce_atom shrinks it to its most-discriminative REDUCED_LEN-byte window
-    // and checks that, where a benign collision is actually possible. An atom
-    // with no clean window is dropped — discriminativeness is measured, not free.
+    // Masked-hex code factor, substring-reduced against the corpus: reduce_atom
+    // shrinks each masked function to its most-discriminative REDUCED_LEN window
+    // and drops atoms with no benign-collision-free window.
     let mut masked_atoms = Vec::new();
     let mut dropped_nondiscriminative = 0usize;
     for f in strong {
@@ -219,8 +210,7 @@ fn run_tier1(
     );
 
     // Independent non-panic author-data factor, rarity-filtered against the
-    // corpus. Excludes anything already present in the panic-path set so the
-    // two factors stay genuinely separate (architecture §6).
+    // corpus. Excludes panic-path strings so the two factors stay separate.
     let mut behavior_candidates: std::collections::BTreeMap<String, u64> =
         std::collections::BTreeMap::new();
     if let Some(rodata) = rodata {
@@ -247,17 +237,12 @@ fn run_tier1(
         }
     }
 
-    // Structural independence (architecture §6). The §6 argument that the two
-    // factors' improbabilities may be *multiplied* is only valid if the factors
-    // are independent, and the emitted condition is `any of ($mcode*) and any
-    // of ($behavior*)`. A masked atom and a behavioral string from the SAME
-    // function are not independent evidence — they are one function described
-    // two ways (its body, and a string it loads). So partition the STRONG
-    // functions: the string factor takes every function that yielded a kept
-    // string, and the code factor takes masked atoms only from functions that
-    // did NOT. The two function sets are then disjoint by construction, which
-    // makes the condition structurally guarantee that the matched atom and the
-    // matched string come from different functions — enforced, not asserted.
+    // Structural independence: multiplying the two factors' improbabilities is
+    // only valid if they come from different functions. So partition the STRONG
+    // functions — the string factor keeps every function that yielded a kept
+    // string; the code factor keeps masked atoms only from the others. Disjoint
+    // by construction, so the condition can't pair an atom and a string from the
+    // same function.
     let masked_count = masked_atoms.len();
     let behavior_fns: BTreeSet<u64> = behavior_strings.iter().map(|(_, f)| *f).collect();
     let mut code_atoms = Vec::new();
@@ -275,9 +260,7 @@ fn run_tier1(
     }
 
     if code_atoms.is_empty() || behavior_strings.is_empty() {
-        // Separate the failure modes so the verdict names the real reason.
-        // "harvested nothing to filter" != "candidates harvested, none rare"
-        // != "factors exist but are not independent".
+        // Name the real failure mode in the verdict.
         let behav_reason: String = if harvested == 0 {
             "no non-panic author-string candidates were harvested from STRONG functions \
              (LEA + length-immediate recovery found none)"

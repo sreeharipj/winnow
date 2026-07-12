@@ -1,24 +1,8 @@
-/// Boundary-free code signal (architecture §5, Tier 2 / §7.B, restricted to
-/// what Phase 1 needs).
-///
-/// Full per-function masked hex — mask every relocation-patched operand,
-/// RIP-relative displacement, and absolute address across the *entire*
-/// function body — is the Tier 1 flagship code factor (architecture §4, §7.B)
-/// and is explicitly DEFERRED to Phase 3, where it ships together with
-/// discriminative-substring reduction against the benign corpus (critique
-/// finding 2: an unreduced masked-hex factor's specificity is unestablished).
-///
-/// Phase 1's code contribution is smaller in scope on purpose: short, exact
-/// byte windows anchored on each direct CALL site inside a STRONG-tier
-/// function. No masking is applied here. That is safe specifically because
-/// Winnow measures itself by scanning the *same on-disk file* the rule was
-/// built from (§8's claim is about a YARA-X static-file scan, not a live
-/// process image) — a near CALL's rel32 encoding is a link-time constant
-/// (IP-relative, so already position-independent) and is bit-for-bit
-/// identical every time that file is read. It is not a load-bearing
-/// specificity claim; it is a call-site-shaped exact-byte atom, which is what
-/// "boundary-free" means here: no full-function mask pass, just local
-/// windows around call sites.
+/// Tier 2 code signal: short, exact (unmasked) byte windows anchored on each
+/// direct CALL site inside a STRONG-tier function. Safe because Winnow scans
+/// the same on-disk file the rule was built from, where a near CALL's rel32 is
+/// a link-time constant. Full per-function masked hex is the Tier 1 factor
+/// (see mask.rs); this is the smaller, boundary-free contribution.
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind};
 
 use crate::elfview::Section;
@@ -33,10 +17,9 @@ pub struct CodeAtom {
     pub bytes: Vec<u8>,
 }
 
-/// Extract up to `MAX_ATOMS_PER_FN` call-site byte windows from a STRONG
-/// function's `[fn_start, fn_end)` range. Falls back to a fixed-size window
-/// from the function's entry if it contains no direct near calls (leaf
-/// functions, e.g. small crypto primitives).
+/// Up to `MAX_ATOMS_PER_FN` call-site byte windows from a STRONG function's
+/// `[fn_start, fn_end)`. Falls back to an entry window for leaf functions with
+/// no direct near calls.
 pub fn extract_code_atoms(text: &Section, fn_start: u64, fn_end: u64) -> Vec<CodeAtom> {
     let Some(fn_bytes) = text.slice_at(fn_start, (fn_end - fn_start) as usize) else {
         return Vec::new();
@@ -54,8 +37,7 @@ pub fn extract_code_atoms(text: &Section, fn_start: u64, fn_end: u64) -> Vec<Cod
         if instr.mnemonic() != Mnemonic::Call {
             continue;
         }
-        // Only direct near calls — indirect calls (register/memory operand)
-        // carry no useful byte-level identity for this signal.
+        // Only direct near calls; indirect calls carry no byte-level identity.
         let is_near_direct = matches!(
             instr.op0_kind(),
             OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64

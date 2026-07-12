@@ -1,8 +1,5 @@
-/// Winnow's own ELF re-open (architecture §9: the JSON contract carries no
-/// bytes, so the consumer re-parses the binary the producer already parsed).
-/// Deliberately thin — Phase 1 only needs `.text` for the code signal;
-/// `.rodata` / `.data.rel.ro` are for the non-panic author-string factor,
-/// which is DEFERRED to Phase 3 (see src/main.rs).
+/// Winnow's own ELF re-open — the JSON contract carries no bytes, so we
+/// re-parse the binary for `.text`, `.rodata`, and `.rela.dyn`.
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -25,14 +22,9 @@ impl Section {
     }
 }
 
-/// A single `R_X86_64_RELATIVE` entry from `.rela.dyn` (mirrors unhusk's
-/// `src/elf.rs`): on-disk bytes at `offset` are pre-relocation placeholders;
-/// the dynamic linker writes `addend` there at load time. Phase 3 uses this
-/// defensively to mask any code byte that a relocation actually patches —
-/// in practice these almost always land in `.data.rel.ro`, not `.text`
-/// (near-CALL rel32 and RIP-relative LEA displacements are link-time
-/// constants, already position-independent by construction), but checking
-/// real relocation records is cheap and evidence-based rather than assumed.
+/// A single `R_X86_64_RELATIVE` entry from `.rela.dyn`: on-disk bytes at
+/// `offset` are placeholders the dynamic linker patches at load time. Used to
+/// mask any code byte a relocation actually touches (rare in `.text`).
 #[derive(Debug, Clone, Copy)]
 pub struct RelaRelative {
     pub offset: u64,

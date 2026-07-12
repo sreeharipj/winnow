@@ -1,44 +1,13 @@
-/// Independent non-panic author-data factor (architecture §6, §7.C).
-///
-/// unhusk's `--json` contract only carries panic-path strings (anchor_files);
-/// it does not expose the addresses of non-panic author-region strings
-/// (C2 hosts, mutex names, ransom text, custom format strings) — architecture
-/// §9's honest seam. Winnow recovers these itself by re-deriving the
-/// `(LEA [rip+rodata], <length>)` fat-pointer construction that Rust emits for
-/// a `&str` literal, but widened from unhusk's "looks like an identifier" to
-/// "printable ASCII of plausible string length" — behavioral strings (URLs,
-/// hosts, ransom text) don't have identifier shape.
-///
-/// ## Why this is a dataflow scan, not adjacency
-///
-/// An earlier version required the length `mov` to be the *literal next*
-/// instruction after the `lea`. Measured against three real samples (krusty,
-/// akira_v2, blackcat_sphynx) that guard rejected 100% of candidates: not one
-/// rodata-targeting `lea` in any STRONG function is immediately followed by a
-/// `mov reg,imm`. Real rustc/LLVM codegen defeats strict adjacency three ways:
-///
-///   1. The length `mov` is separated from the `lea` by unrelated argument
-///      setup — e.g. `lea rsi,[rip+STR]; lea rdi,[rsp+buf]; mov edx,LEN; call`
-///      (blackcat's `esxcli ... vm process list`, len 83).
-///   2. Small lengths are loaded with the size-optimized idiom `push imm8;
-///      pop reg`, never a `mov` at all (akira's path/command fragments).
-///   3. The length is stored as the length half of a `(ptr,len)` fat pointer
-///      via `mov [mem], imm` when the slice is written into a struct/array.
-///
-/// So we scan a short forward window after each rodata `lea`, stopping the
-/// moment the pointer register is redefined (this is what prevents a stale
-/// `lea` from being paired with an unrelated later length — the splice bug the
-/// old adjacency rule was really trying to avoid). The length is the first
-/// in-range immediate assigned to a *different* register (or memory) inside
-/// that window whose `rodata[target..target+len]` slice is exactly printable.
-/// `.rodata` holds unterminated, back-to-back string bytes, so the exact
-/// length is what carves out a stable logical string; a wrong length almost
-/// always fails the printable-slice check.
-///
-/// This module only *harvests candidates*. Independence (§6: these must not
-/// be panic-path strings under another name) and rarity (§7.C: only worth
-/// including if unlikely to appear benignly) are enforced by the caller
-/// (main.rs) against the panic-string set and the benign corpus respectively.
+/// Independent non-panic author-data factor: recovers `&str` literals (C2
+/// hosts, mutex names, ransom text) that unhusk's JSON doesn't expose, by
+/// re-deriving the `(lea [rip+rodata], <length>)` fat-pointer construction Rust
+/// emits. The length isn't necessarily the next instruction — codegen separates
+/// it with unrelated arg-setup, uses `push imm; pop reg` for small values, or
+/// stores it to memory. So we scan a short forward window after each rodata
+/// `lea`, stopping when the pointer register is redefined, and take the first
+/// in-range immediate whose `rodata[target..target+len]` slice is exactly
+/// printable. This module only harvests candidates; independence and rarity are
+/// enforced by the caller (main.rs).
 use iced_x86::{
     Decoder, DecoderOptions, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
     Register,
@@ -48,11 +17,8 @@ use crate::elfview::Section;
 
 const MIN_LEN: usize = 6;
 const MAX_LEN: usize = 200;
-/// How many instructions after a rodata `lea` we look for its length. Sized
-/// from ground truth: the widest real gap observed (blackcat) is 2, so 8
-/// leaves headroom for denser argument setup without wandering into the next
-/// unrelated string construction (which a pointer-register redefinition ends
-/// first anyway).
+/// Instructions after a rodata `lea` to search for its length. Widest real gap
+/// observed (blackcat) is 2; 8 leaves headroom.
 const WINDOW: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -61,15 +27,12 @@ pub struct BehaviorString {
     pub text: String,
 }
 
-/// One decoded instruction, reduced to the two things the pairing scan needs:
-/// which pointer it loads (if any), what length immediate it defines (if any),
-/// and which full registers it writes (for pointer-clobber detection).
+/// One decoded instruction, reduced to what the pairing scan needs.
 struct Decoded {
-    /// `Some((ptr_full_reg, rodata_target))` for a `lea reg,[rip+X]` whose X
-    /// lands in `.rodata`.
+    /// `Some((ptr_full_reg, rodata_target))` for a `lea reg,[rip+X]` into `.rodata`.
     lea_target: Option<(Register, u64)>,
     len_src: Option<LenSrc>,
-    /// Full (64-bit) registers this instruction writes.
+    /// Full (64-bit) registers this instruction writes (for clobber detection).
     writes: Vec<Register>,
 }
 
@@ -105,8 +68,7 @@ pub fn extract_behavior_strings(
         let mut pending_push: Option<u64> = None;
         let end = (i + 1 + WINDOW).min(decoded.len());
         for w in &decoded[i + 1..end] {
-            // The pointer register is redefined: any length past this point
-            // belongs to a different string. Stop before mis-pairing.
+            // Pointer register redefined: any later length is a different string.
             if w.writes.iter().any(|r| *r == ptr_full) {
                 break;
             }
@@ -130,9 +92,8 @@ pub fn extract_behavior_strings(
                 }
                 _ => {}
             }
-            // A `push` was the only thing that kept a pending length alive; any
-            // other instruction breaks the strict push/pop adjacency codegen
-            // actually emits.
+            // Only a `push` keeps a pending length alive; anything else breaks
+            // the strict push/pop adjacency.
             pending_push = None;
 
             if let Some(len) = candidate {
@@ -244,9 +205,8 @@ fn try_extract_string(rodata: &Section, vaddr: u64, len: usize) -> Option<String
         return None;
     }
     let s = std::str::from_utf8(bytes).ok()?;
-    // Panic-path strings are the confirming factor (architecture §6), not
-    // independent — exclude anything that looks like a source path so the
-    // two factors never overlap.
+    // Exclude source-path-shaped strings so this factor never overlaps the
+    // panic-path (confirming) factor.
     if s.ends_with(".rs") || s.contains("src/") {
         return None;
     }

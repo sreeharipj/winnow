@@ -1,11 +1,6 @@
-/// Rule Assembler + Provenance Stamper (architecture §7.E, §7.F) — Tier 2.
-///
-/// Emits one YARA-X rule per sample: author panic-path strings (from
-/// unhusk's `anchor_files`, already attributed — no independent rarity
-/// filter yet, that needs the benign corpus and is Phase 3) plus the
-/// boundary-free code atoms from `code.rs`. Portable byte-pattern core only;
-/// no YARA-X-only condition is load-bearing (architecture §7.E), so these
-/// rules also run under legacy YARA.
+/// Emits the Tier 2 YARA rule per sample: author panic-path strings (unhusk
+/// `anchor_files`) plus boundary-free code atoms from `code.rs`. Portable
+/// byte-pattern core only, so the rules also run under legacy YARA.
 use std::path::Path;
 
 use crate::code::CodeAtom;
@@ -63,12 +58,9 @@ pub fn build_rule(inp: &RuleInputs) -> String {
     out
 }
 
-/// Tier 1 flagship rule (architecture §5, §6, §7). Condition requires the
-/// masked-code factor AND the independent behavioral-data factor — the two
-/// things whose improbabilities are allowed to multiply (§6). Panic strings
-/// are included only as confirming/informational context in `meta`, never
-/// in the condition, so they are never double-counted as independent
-/// evidence for the same functions that produced them.
+/// Tier 1 flagship rule. Condition requires the masked-code factor AND the
+/// independent behavioral-data factor; panic strings appear only in `meta`,
+/// never in the condition, so they are never double-counted as evidence.
 pub struct Tier1Inputs<'a> {
     pub sample_name: &'a str,
     pub sample_path: &'a Path,
@@ -77,10 +69,8 @@ pub struct Tier1Inputs<'a> {
     pub strong_fn_count: usize,
     pub panic_strings: Vec<String>,
     pub masked_atoms: Vec<MaskedAtom>,
-    /// `(text, fn_start)` for each kept behavioral string. `fn_start` is the
-    /// function it was recovered from; by construction (main.rs) none of these
-    /// functions appears among `masked_atoms`' functions, so the two factors
-    /// are structurally independent (architecture §6).
+    /// `(text, fn_start)` per kept behavioral string. main.rs guarantees these
+    /// functions are disjoint from `masked_atoms`', keeping the factors independent.
     pub behavior_strings: Vec<(String, u64)>,
     pub corpus_size: usize,
 }
@@ -320,8 +310,6 @@ mod tests {
         };
 
         let text = build_tier1_rule(&inputs);
-        // The independence meta must name the two disjoint function sets, and
-        // the string must be annotated with its originating function.
         assert!(text.contains("independence = \"structural: code factor from function(s) {0x1000}"));
         assert!(text.contains("string factor from function(s) {0x2000}"));
         assert!(text.contains("$behavior0 = \"evil.example\" ascii // fn 0x2000"));

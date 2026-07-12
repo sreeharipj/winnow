@@ -1,25 +1,9 @@
-/// Per-function masked hex (architecture §4, §7.B) — the Tier 1 flagship
-/// code factor, built only in Phase 3.
-///
-/// "Masking is correctness, not resilience" (architecture §4): we mask only
-/// bytes that are *provably volatile*, keeping everything else byte-exact.
-/// Three sources of volatility, all evidence-based rather than assumed:
-///
-///   1. A memory operand's RIP-relative displacement — named explicitly in
-///      the architecture doc. Its on-disk bytes are in fact a link-time
-///      constant (RIP-relative addressing is already position-independent),
-///      but we mask it anyway per the doc's stated policy, since Winnow's
-///      output is meant to be safe under stricter (e.g. memory-scan) reuse
-///      than the file-scan self-test this project measures.
-///   2. A 64-bit immediate (`movabs`-style absolute address) — the classic
-///      vector for embedding a pointer that ASLR/relocation can move.
-///   3. Any byte range that a real `.rela.dyn` `R_X86_64_RELATIVE` entry
-///      actually patches at load time — checked against `ParsedElf::
-///      rela_relative` rather than guessed from instruction shape.
-///
-/// Ordinary displacements (`[rbp-8]`, stack/heap-relative) and small
-/// immediates are left exact — masking them would only throw away
-/// specificity for no correctness reason.
+/// Per-function masked hex — the Tier 1 code factor. Masks only provably
+/// volatile bytes, keeping everything else exact:
+///   1. RIP-relative displacements,
+///   2. 64-bit absolute immediates (`movabs`), and
+///   3. any range a real `.rela.dyn` `R_X86_64_RELATIVE` entry patches.
+/// Ordinary stack displacements and small immediates are left exact.
 use iced_x86::{Decoder, DecoderOptions, Instruction, Register};
 
 use crate::elfview::{RelaRelative, Section};

@@ -1,14 +1,6 @@
-/// Ingest & Evidence Census (architecture §7.A) — Phase 1 slice.
-///
-/// Winnow does not re-implement author-function attribution. It shells out to
-/// `unhusk --precision --json <elf>` and consumes the JSON contract as-is:
-/// `{binary, arch, min_anchors, functions:[{start,end,size,tier,anchor_count,
-/// anchor_files}]}`. Boundaries, tiers, and panic source paths come from here;
-/// raw bytes come from Winnow's own re-open of the ELF (see `elfview.rs`).
-///
-/// This is the subprocess+JSON seam the architecture doc (§3, §9) argues for,
-/// not a path-dependency on unhusk's internals — the two projects communicate
-/// only through this contract.
+/// Shells out to `unhusk --precision --json <elf>` and consumes the JSON
+/// contract as-is for function boundaries, tiers, and panic source paths. Raw
+/// bytes come from Winnow's own ELF re-open (see `elfview.rs`).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -51,11 +43,8 @@ where
 /// override, PATH lookup, then the sibling-repo convention this project's
 /// build spec assumes (`~/Videos/winnow` next to `~/Videos/unhusk`).
 pub fn run_unhusk(elf_path: &Path, unhusk_bin: Option<&Path>) -> Result<Census> {
-    // An explicit override is exclusive, not merely first-tried: silently
-    // falling back to PATH/sibling after a user-specified binary fails would
-    // mean winnow ran a *different* unhusk than the one asked for, which
-    // defeats the point of pinning it (reproducibility is the whole reason
-    // --unhusk-bin exists).
+    // An explicit override is exclusive: no PATH/sibling fallback, so winnow
+    // never silently runs a different unhusk than the one pinned.
     let candidates: Vec<PathBuf> = match unhusk_bin {
         Some(p) => vec![p.to_path_buf()],
         None => vec![
@@ -145,12 +134,8 @@ mod tests {
         );
     }
 
-    /// Writes an executable stub standing in for `unhusk` so the
-    /// subprocess+JSON seam (`run_unhusk`) can be exercised without the real
-    /// binary installed. `tempfile` gives each call a guaranteed-unique path
-    /// (no pid-reuse races) and deletes it on drop, even if the test panics.
-    /// `into_temp_path()` closes our own write handle before returning —
-    /// exec-ing a script we still hold open for writing is ETXTBSY.
+    /// Executable stub standing in for `unhusk`. `into_temp_path()` closes our
+    /// write handle before returning — exec-ing a still-open script is ETXTBSY.
     fn write_stub(script: &str) -> tempfile::TempPath {
         let mut f = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
         f.write_all(script.as_bytes()).unwrap();
@@ -160,12 +145,9 @@ mod tests {
         f.into_temp_path()
     }
 
-    /// Sandboxed/CI filesystems can intermittently return ETXTBSY when a
-    /// just-written, just-chmod'd script is exec'd within milliseconds of
-    /// being closed — a transient exec-after-write race in the filesystem
-    /// layer, not a defect in `run_unhusk`. A real `unhusk` on PATH is never
-    /// written moments before use, so this only bites this test's own setup;
-    /// retrying the spawn a few times is the standard workaround.
+    /// Retries the spawn past transient ETXTBSY: sandboxed filesystems can
+    /// briefly report a just-written, just-chmod'd script as busy. Only the
+    /// test's own setup hits this; a real `unhusk` on PATH never does.
     fn run_unhusk_retrying_exec_races(elf: &Path, bin: &tempfile::TempPath) -> Result<Census> {
         let mut last = None;
         for _ in 0..5 {
