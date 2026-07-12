@@ -37,14 +37,6 @@ impl Corpus {
 
     /// A string is "rare" (architecture §7.C) if it appears in none of the
     /// benign corpus files.
-    ///
-    /// Kept serial deliberately: `contains_subslice` (memmem) already scans the
-    /// corpus at ~39 GB/s, i.e. at this machine's DRAM bandwidth, so it is
-    /// memory-bound, not compute-bound. Spreading it over cores was *measured*
-    /// at 0.9x — threads only add overhead against a bandwidth ceiling they
-    /// cannot raise. (The masked scan in `any_file_matches` is compute-bound at
-    /// ~18 GB/s and *does* profit from `any_file`; the difference is measured,
-    /// not assumed — the same discipline this whole project runs on.)
     pub fn string_is_rare(&self, s: &str) -> bool {
         let needle = s.as_bytes();
         !self
@@ -66,7 +58,9 @@ impl Corpus {
     }
 
     fn any_file_matches(&self, pat: &[MaskByte]) -> bool {
-        any_file(&self.files, |data| masked_match_anywhere(data, pat))
+        self.files
+            .iter()
+            .any(|(_, data)| masked_match_anywhere(data, pat))
     }
 
     /// Discriminative-substring *reduction* (architecture §7.B, critique
@@ -136,57 +130,6 @@ fn count_exact(win: &[MaskByte]) -> usize {
     win.iter().filter(|b| matches!(b, MaskByte::Exact(_))).count()
 }
 
-/// Run `pred` over every corpus file and return whether *any* file matches,
-/// spread across the machine's cores.
-///
-/// Used for the masked-window scan (`any_file_matches`), which is compute-bound
-/// (~18 GB/s serial: memchr anchor + per-hit wildcard compare) and so has
-/// headroom to parallelize — measured at ~1.9x here, tailing off where the scan
-/// reaches DRAM bandwidth (a memory-bound scan like `string_is_rare`'s memmem
-/// has no such headroom and is deliberately left serial). The OR-fold is
-/// order-independent, so the result is deterministic regardless of scheduling.
-/// A shared work-stealing cursor (rather than a fixed file-per-thread split)
-/// keeps every core busy despite the corpus's wildly uneven file sizes, and the
-/// `found` flag lets the first match short-circuit *all* threads at once —
-/// which is exactly what a colliding masked window (`reduce_atom`'s drop path)
-/// wants.
-fn any_file<F>(files: &[(String, Vec<u8>)], pred: F) -> bool
-where
-    F: Fn(&[u8]) -> bool + Sync,
-{
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    let n = files.len();
-    let threads = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(1)
-        .min(n);
-    // One file (or none, or no parallelism) isn't worth a thread pool.
-    if threads <= 1 {
-        return files.iter().any(|(_, d)| pred(d));
-    }
-
-    let found = AtomicBool::new(false);
-    let cursor = AtomicUsize::new(0);
-    std::thread::scope(|s| {
-        for _ in 0..threads {
-            s.spawn(|| {
-                while !found.load(Ordering::Relaxed) {
-                    let i = cursor.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    if pred(&files[i].1) {
-                        found.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                }
-            });
-        }
-    });
-    found.load(Ordering::Relaxed)
-}
-
 fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || needle.len() > hay.len() {
         return false;
@@ -199,45 +142,83 @@ fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
     memchr::memmem::find(hay, needle).is_some()
 }
 
-/// Wildcard-aware substring search. Anchors on the first exact byte in the
-/// pattern so a random binary's bytes rarely reach the full per-position
-/// comparison — without this, an ~11KB masked-function atom against a
-/// multi-MB corpus file is prohibitively slow.
+/// Wildcard-aware substring search: is `pat` present anywhere in `hay`, with
+/// `MaskByte::Wildcard` matching any byte?
 ///
-/// The anchor-byte hunt itself is delegated to `memchr` (SIMD) rather than the
-/// old byte-at-a-time `for start in 0..=last_start` scan: on the ~1.5GB corpus
-/// that lifted this primitive from ~2.0 GB/s to ~19 GB/s (~10x), measured, for
-/// identical results. Only positions where the anchor byte actually lands pay
-/// for the full per-position wildcard comparison.
+/// The prefilter is the pattern's LONGEST contiguous run of exact bytes, handed
+/// to `memchr::memmem` (SIMD). Any real match must contain that run verbatim, so
+/// memmem enumerates every candidate window start and the full wildcard-aware
+/// compare runs only there. Even a few exact bytes make the run specific enough
+/// that essentially nothing in ~1.5GB survives the prefilter by chance, so the
+/// scan is memory-bound: ~40 GB/s, measured. The earlier single-byte anchor
+/// (`memchr`) let ~1/256 of positions reach the compare and was compute-bound at
+/// ~18 GB/s; a longer needle is simply a stronger prefilter. When the exact
+/// bytes are so scattered that the longest run is one byte, this degrades to
+/// exactly that memchr behavior. An all-wildcard pattern discriminates nothing
+/// and never matches.
 fn masked_match_anywhere(hay: &[u8], pat: &[MaskByte]) -> bool {
     if pat.is_empty() || pat.len() > hay.len() {
         return false;
     }
-    let Some((anchor_idx, anchor_byte)) = pat.iter().enumerate().find_map(|(i, b)| match b {
-        MaskByte::Exact(v) => Some((i, *v)),
-        MaskByte::Wildcard => None,
-    }) else {
-        // All-wildcard pattern can't discriminate anything; treat as no match
-        // rather than a trivial match-everything.
+    let Some((run_off, run)) = longest_exact_run(pat) else {
+        // All-wildcard pattern can't discriminate anything.
         return false;
     };
 
-    // A candidate window starts at hay index `start` (0..=last_start), and its
-    // anchor byte sits at `start + anchor_idx`. So the anchor can only legally
-    // occur within hay[anchor_idx ..= anchor_idx + last_start]; each memchr hit
-    // at scan-relative `start` is a window whose anchor already matches.
     let last_start = hay.len() - pat.len();
-    let scan = &hay[anchor_idx..=anchor_idx + last_start];
-    for start in memchr::memchr_iter(anchor_byte, scan) {
-        let matches = pat.iter().enumerate().all(|(i, pb)| match pb {
-            MaskByte::Exact(b) => hay[start + i] == *b,
-            MaskByte::Wildcard => true,
-        });
-        if matches {
-            return true;
+    let finder = memchr::memmem::Finder::new(&run);
+    // memmem yields non-overlapping matches, but overlapping run occurrences can
+    // each seed a distinct window start, so step by one past each hit to see all.
+    let mut from = 0;
+    while let Some(rel) = finder.find(&hay[from..]) {
+        let hit = from + rel; // hay index where the exact run begins
+        // The run sits at pat[run_off..], so a full match anchored here would
+        // begin at hay index `hit - run_off`.
+        if let Some(start) = hit.checked_sub(run_off) {
+            if start <= last_start
+                && pat.iter().enumerate().all(|(i, pb)| match pb {
+                    MaskByte::Exact(b) => hay[start + i] == *b,
+                    MaskByte::Wildcard => true,
+                })
+            {
+                return true;
+            }
         }
+        from = hit + 1;
     }
     false
+}
+
+/// The longest contiguous run of `Exact` bytes in `pat`, as `(offset, bytes)`;
+/// `None` iff `pat` is all wildcards. Ties keep the first (leftmost) run — any
+/// maximal run is an equally valid prefilter, so the choice is arbitrary.
+fn longest_exact_run(pat: &[MaskByte]) -> Option<(usize, Vec<u8>)> {
+    let mut best: Option<(usize, usize)> = None; // (start, len)
+    let mut i = 0;
+    while i < pat.len() {
+        if matches!(pat[i], MaskByte::Exact(_)) {
+            let start = i;
+            while i < pat.len() && matches!(pat[i], MaskByte::Exact(_)) {
+                i += 1;
+            }
+            let len = i - start;
+            if best.is_none_or(|(_, best_len)| len > best_len) {
+                best = Some((start, len));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    best.map(|(start, len)| {
+        let bytes = pat[start..start + len]
+            .iter()
+            .map(|b| match b {
+                MaskByte::Exact(v) => *v,
+                MaskByte::Wildcard => unreachable!("a run of Exact bytes has no wildcard"),
+            })
+            .collect();
+        (start, bytes)
+    })
 }
 
 #[cfg(test)]
@@ -361,5 +342,67 @@ mod tests {
         };
         let c = corpus(vec![("benign", &[0, 1, 2, 3, 4, 5])]);
         assert!(c.masked_atom_collisions(&atom).is_empty());
+    }
+
+    #[test]
+    fn masked_atom_matches_when_longest_run_is_mid_pattern() {
+        // Prefilter run "AA BB CC" sits at offset 2 (run_off = 2), with leading
+        // and trailing wildcards. The compare must be anchored back to the
+        // window start (hit - run_off), not the run itself.
+        let atom = MaskedAtom {
+            fn_start: 0,
+            bytes: vec![
+                MaskByte::Wildcard,
+                MaskByte::Wildcard,
+                MaskByte::Exact(0xAA),
+                MaskByte::Exact(0xBB),
+                MaskByte::Exact(0xCC),
+                MaskByte::Wildcard,
+            ],
+        };
+        let c = corpus(vec![("benign", &[0x11, 0x22, 0xAA, 0xBB, 0xCC, 0x33])]);
+        assert_eq!(c.masked_atom_collisions(&atom), vec!["benign".to_string()]);
+    }
+
+    #[test]
+    fn masked_atom_run_too_close_to_start_cannot_seed_a_window() {
+        // Same pattern, but the run's only occurrence is at file index 0 — there
+        // is no room for the two leading wildcard bytes, so window start would be
+        // -2. The checked_sub(run_off) underflow guard must reject it.
+        let atom = MaskedAtom {
+            fn_start: 0,
+            bytes: vec![
+                MaskByte::Wildcard,
+                MaskByte::Wildcard,
+                MaskByte::Exact(0xAA),
+                MaskByte::Exact(0xBB),
+                MaskByte::Exact(0xCC),
+                MaskByte::Wildcard,
+            ],
+        };
+        let c = corpus(vec![("benign", &[0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x00])]);
+        assert!(c.masked_atom_collisions(&atom).is_empty());
+    }
+
+    #[test]
+    fn longest_exact_run_picks_the_longest_contiguous_run() {
+        // runs: [0]=1, [2..4]=2, [6..9]=3 -> longest is the length-3 run at 6.
+        let pat = vec![
+            MaskByte::Exact(0x01),
+            MaskByte::Wildcard,
+            MaskByte::Exact(0x02),
+            MaskByte::Exact(0x03),
+            MaskByte::Wildcard,
+            MaskByte::Wildcard,
+            MaskByte::Exact(0x04),
+            MaskByte::Exact(0x05),
+            MaskByte::Exact(0x06),
+        ];
+        assert_eq!(longest_exact_run(&pat), Some((6, vec![0x04, 0x05, 0x06])));
+    }
+
+    #[test]
+    fn longest_exact_run_is_none_for_all_wildcards() {
+        assert_eq!(longest_exact_run(&[MaskByte::Wildcard; 5]), None);
     }
 }
