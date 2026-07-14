@@ -2,8 +2,6 @@
 
 Generates YARA-X rules for stripped x86-64 Rust malware. One binary in, one rule for that binary out. Built on [unhusk](https://github.com/sreeharipj/unhusk), which isolates the author-written functions in a stripped Rust binary from panic metadata.
 
-> Experimental research project, single author. Validated on 3 usable in-the-wild Rust malware samples and a 154-binary benign Rust corpus measured on a held-out split, static analysis only, samples never executed. x86-64 ELF only. Numbers and interfaces change as evidence accumulates.
-
 unhusk answers "which bytes in this stripped Rust binary are the author's." winnow turns that answer into a signature. Because unhusk's inputs are attributed to the author by construction — panic-metadata provenance, not a heuristic — the bytes and strings winnow builds a rule from are the author's own, not stdlib and not dependency crates. A rule built only from author-unique material should not fire on unrelated software. winnow exists to find out whether that holds, and it is built so the claim has to survive a measurement instead of an argument.
 
 ## One binary, one rule (the design, not a shortcut)
