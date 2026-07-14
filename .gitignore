@@ -9,4 +9,4 @@
 /corpus/manifest.csv.*
 !/corpus/manifest.csv
 /rules/*.yar
-/results/*_benign_hits.txt
+/results/
