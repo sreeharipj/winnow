@@ -134,4 +134,4 @@ unhusk is the backend; winnow is the rule generator behind its JSON contract. wi
 
 ## License
 
-Dual-licensed: AGPL-3.0 for open-source and general use, or a commercial license for proprietary use. See `LICENSE`.
+Licensed under the Apache License, Version 2.0. See `LICENSE`.
