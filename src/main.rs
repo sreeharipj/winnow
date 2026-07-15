@@ -259,6 +259,26 @@ fn run_tier1(
         }
     }
 
+    // Collapse byte-identical atoms: once volatile operands are masked, two
+    // monomorphized copies of a function reduce to the same window (akira
+    // 0xc805c vs 0xc8116). A duplicate pattern adds no independent evidence and
+    // makes YARA-X warn, so keep the first occurrence and drop the rest.
+    let before_dedup = code_atoms.len();
+    let mut deduped: Vec<mask::MaskedAtom> = Vec::new();
+    for atom in code_atoms {
+        if !deduped.iter().any(|k| k.bytes == atom.bytes) {
+            deduped.push(atom);
+        }
+    }
+    let code_atoms = deduped;
+    if code_atoms.len() < before_dedup {
+        println!(
+            "winnow: tier1 — collapsed {} byte-identical masked atom(s) after masking \
+             (monomorphized duplicates)",
+            before_dedup - code_atoms.len()
+        );
+    }
+
     if code_atoms.is_empty() || behavior_strings.is_empty() {
         // Name the real failure mode in the verdict.
         let behav_reason: String = if harvested == 0 {
