@@ -34,10 +34,10 @@ Run against a real Akira ransomware sample with `--tier1`:
 ```
 wrote akira_v2_x.yar (7 STRONG fns, 4 panic strings, 21 code atoms)
 tier1 — measuring against benign corpus (78 files)
-tier1 — masked atom for fn 0xc805c reduced 186B -> 64B window at +0x2b (64 exact bytes, 0 corpus collisions)
+tier1 — masked atom for fn 0xc805c reduced 186B -> 64B window at +0x7a (56 exact bytes, 0 corpus collisions)
 tier1 — behavioral string "/tmp/stop_vms.sh" (fn 0xdc434) is rare — kept
 tier1 — code factor: 7 atom(s) reduced & kept, 0 dropped as non-discriminative
-wrote akira_v2_x_tier1.yar (TIER 1 EARNED — 3 masked-code atoms, 22 independent behavioral strings)
+wrote akira_v2_x_tier1.yar (TIER 1 EARNED — 2 masked-code atoms, 22 independent behavioral strings)
 ```
 
 The rule it wrote: [`examples/akira_v2_x_tier1.yar`](examples/akira_v2_x_tier1.yar) — a real Tier 1 rule, masked code atoms and independent behavioral strings drawn from disjoint functions, unmodified from what the tool produced.
