@@ -10,3 +10,5 @@
 !/corpus/manifest.csv
 /rules/*.yar
 /results/
+/demo/
+/.bin/

@@ -1,5 +1,7 @@
 # winnow
 
+![winnow turning a stripped Akira binary into a Tier 1 YARA-X rule in one command](docs/winnow.gif)
+
 Generates a YARA-X rule for a stripped x86-64 Rust malware binary. One binary in, one rule for that binary out. Built on [unhusk](https://github.com/sreeharipj/unhusk), which isolates the author-written functions in a stripped Rust binary from panic metadata.
 
 unhusk answers "which bytes in this stripped Rust binary are the author's." winnow turns that answer into a signature. Because unhusk's inputs are attributed to the author by construction — panic-metadata provenance, not a heuristic — the bytes and strings winnow builds a rule from are the author's own, not stdlib and not dependency crates. A rule built only from author-unique material should not fire on unrelated software; that claim is measured, not assumed (zero false positives across three rules on a 76-binary held-out corpus — see [`docs/validation.md`](docs/validation.md)).
@@ -35,7 +37,7 @@ tier1 — measuring against benign corpus (78 files)
 tier1 — masked atom for fn 0xc805c reduced 186B -> 64B window at +0x2b (64 exact bytes, 0 corpus collisions)
 tier1 — behavioral string "/tmp/stop_vms.sh" (fn 0xdc434) is rare — kept
 tier1 — code factor: 7 atom(s) reduced & kept, 0 dropped as non-discriminative
-wrote akira_v2_x_tier1.yar
+wrote akira_v2_x_tier1.yar (TIER 1 EARNED — 3 masked-code atoms, 22 independent behavioral strings)
 ```
 
 The rule it wrote: [`examples/akira_v2_x_tier1.yar`](examples/akira_v2_x_tier1.yar) — a real Tier 1 rule, masked code atoms and independent behavioral strings drawn from disjoint functions, unmodified from what the tool produced.
